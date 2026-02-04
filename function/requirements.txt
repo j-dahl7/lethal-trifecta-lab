@@ -1,0 +1,11 @@
+# Azure Functions
+azure-functions>=1.17.0
+
+# Azure Identity (for managed identity)
+azure-identity>=1.15.0
+
+# Azure Monitor (for Log Analytics ingestion)
+azure-monitor-ingestion>=1.0.3
+
+# Azure Cosmos DB
+azure-cosmos>=4.5.0

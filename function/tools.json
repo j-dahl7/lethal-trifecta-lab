@@ -1,0 +1,60 @@
+{
+  "tools": [
+    {
+      "name": "read_db",
+      "description": "Read records from the employee database",
+      "condition": "private_data",
+      "category": "data_access"
+    },
+    {
+      "name": "read_keyvault",
+      "description": "Read secrets from Azure Key Vault",
+      "condition": "private_data",
+      "category": "data_access"
+    },
+    {
+      "name": "process_document",
+      "description": "Process and parse an uploaded document",
+      "condition": "untrusted_content",
+      "category": "content_processing"
+    },
+    {
+      "name": "process_user_message",
+      "description": "Process a message from an external user",
+      "condition": "untrusted_content",
+      "category": "content_processing"
+    },
+    {
+      "name": "search_web",
+      "description": "Search the web and return results",
+      "condition": "untrusted_content",
+      "category": "content_processing"
+    },
+    {
+      "name": "send_http",
+      "description": "Send an HTTP request to an external endpoint",
+      "condition": "exfiltration_vector",
+      "category": "external_communication"
+    },
+    {
+      "name": "send_email",
+      "description": "Send an email message",
+      "condition": "exfiltration_vector",
+      "category": "external_communication"
+    }
+  ],
+  "conditions": {
+    "private_data": {
+      "description": "Access to private or sensitive data",
+      "tools": ["read_db", "read_keyvault"]
+    },
+    "untrusted_content": {
+      "description": "Processing content from untrusted sources",
+      "tools": ["process_document", "process_user_message", "search_web"]
+    },
+    "exfiltration_vector": {
+      "description": "Ability to send data to external destinations",
+      "tools": ["send_http", "send_email"]
+    }
+  }
+}
