@@ -224,7 +224,8 @@ Write-Host "Step 4/7: Configuring Function App..." -ForegroundColor Cyan
     -ResourceGroupName $config['RESOURCE_GROUP_NAME'] `
     -DcrEndpoint $config['DCR_ENDPOINT_URL'] `
     -DcrRuleId $config['DCR_RULE_ID'] `
-    -CosmosEndpoint $config['COSMOS_ENDPOINT']
+    -CosmosEndpoint $config['COSMOS_ENDPOINT'] `
+    -CosmosAccountName $config['COSMOS_ACCOUNT_NAME']
 
 if ($LASTEXITCODE -ne 0) {
     throw "Function App configuration failed"

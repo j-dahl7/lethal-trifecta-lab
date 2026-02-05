@@ -6,7 +6,7 @@
 .DESCRIPTION
     Updates Function App settings with:
     - Data Collection Rule endpoint and ID (for audit logging)
-    - Cosmos DB endpoint and database name (for demo data)
+    - Cosmos DB endpoint, key, and database name (for session state and demo data)
 
 .PARAMETER FunctionAppName
     Name of the Function App.
@@ -22,6 +22,12 @@
 
 .PARAMETER CosmosEndpoint
     Cosmos DB account endpoint URL.
+
+.PARAMETER CosmosAccountName
+    Cosmos DB account name (used to retrieve key).
+
+.PARAMETER CosmosKey
+    Cosmos DB account key. If not provided, retrieved from CosmosAccountName.
 
 .PARAMETER CosmosDatabaseName
     Cosmos DB database name. Default: trifecta-db
@@ -45,12 +51,31 @@ param(
     [string]$CosmosEndpoint,
 
     [Parameter()]
+    [string]$CosmosAccountName,
+
+    [Parameter()]
+    [string]$CosmosKey,
+
+    [Parameter()]
     [string]$CosmosDatabaseName = 'trifecta-db'
 )
 
 $ErrorActionPreference = 'Stop'
 
 Write-Host "Configuring Function App settings..." -ForegroundColor Yellow
+
+# Retrieve Cosmos DB key if not provided
+if (-not $CosmosKey -and $CosmosAccountName) {
+    Write-Host "  Retrieving Cosmos DB key..." -ForegroundColor Cyan
+    $CosmosKey = az cosmosdb keys list `
+        --name $CosmosAccountName `
+        --resource-group $ResourceGroupName `
+        --query primaryMasterKey -o tsv 2>$null
+
+    if (-not $CosmosKey) {
+        Write-Host "  WARNING: Could not retrieve Cosmos DB key. Session persistence may not work." -ForegroundColor Yellow
+    }
+}
 
 # Build settings array
 $settings = @(
@@ -59,6 +84,10 @@ $settings = @(
     "COSMOS_ENDPOINT=$CosmosEndpoint"
     "COSMOS_DATABASE_NAME=$CosmosDatabaseName"
 )
+
+if ($CosmosKey) {
+    $settings += "COSMOS_KEY=$CosmosKey"
+}
 
 # Update Function App settings
 Write-Host "  Updating app settings..." -ForegroundColor Cyan

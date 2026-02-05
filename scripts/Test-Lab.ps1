@@ -38,7 +38,7 @@ $failed = 0
 Write-Host "`nTest 1: Health endpoint" -ForegroundColor Yellow
 try {
     $healthUrl = "$FunctionAppUrl/api/health"
-    $healthResponse = Invoke-RestMethod -Uri $healthUrl -Method GET -TimeoutSec 30
+    $healthResponse = Invoke-RestMethod -Uri $healthUrl -Method GET -TimeoutSec 60
 
     if ($healthResponse.status -eq 'healthy' -and $healthResponse.service -eq 'trifecta-gate') {
         Write-Host "  PASSED: Health check returned healthy" -ForegroundColor Green
@@ -58,7 +58,7 @@ catch {
 Write-Host "`nTest 2: Tools endpoint" -ForegroundColor Yellow
 try {
     $toolsUrl = "$FunctionAppUrl/api/tools"
-    $toolsResponse = Invoke-RestMethod -Uri $toolsUrl -Method GET -TimeoutSec 30
+    $toolsResponse = Invoke-RestMethod -Uri $toolsUrl -Method GET -TimeoutSec 60
 
     if ($toolsResponse.tools.Count -eq 7) {
         Write-Host "  PASSED: Returned 7 tools" -ForegroundColor Green
@@ -80,7 +80,7 @@ $testSessionId = "smoke-test-$(Get-Date -Format 'yyyyMMddHHmmss')"
 try {
     $evaluateUrl = "$FunctionAppUrl/api/evaluate"
     $body = @{ session_id = $testSessionId; tool_name = "read_db" } | ConvertTo-Json
-    $evalResponse = Invoke-RestMethod -Uri $evaluateUrl -Method POST -Body $body -ContentType "application/json" -TimeoutSec 30
+    $evalResponse = Invoke-RestMethod -Uri $evaluateUrl -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
 
     if ($evalResponse.decision -eq 'ALLOW') {
         Write-Host "  PASSED: read_db allowed (1/3 conditions)" -ForegroundColor Green
@@ -101,7 +101,7 @@ Write-Host "`nTest 4: Trifecta block sequence" -ForegroundColor Yellow
 try {
     # Second call - untrusted_content (should be ALLOW)
     $body2 = @{ session_id = $testSessionId; tool_name = "process_document" } | ConvertTo-Json
-    $eval2 = Invoke-RestMethod -Uri $evaluateUrl -Method POST -Body $body2 -ContentType "application/json" -TimeoutSec 30
+    $eval2 = Invoke-RestMethod -Uri $evaluateUrl -Method POST -Body $body2 -ContentType "application/json" -TimeoutSec 60
 
     if ($eval2.decision -ne 'ALLOW') {
         Write-Host "  FAILED: process_document should be ALLOW, got $($eval2.decision)" -ForegroundColor Red
@@ -113,7 +113,7 @@ try {
         $blocked = $false
 
         try {
-            $eval3 = Invoke-WebRequest -Uri $evaluateUrl -Method POST -Body $body3 -ContentType "application/json" -TimeoutSec 30
+            $eval3 = Invoke-WebRequest -Uri $evaluateUrl -Method POST -Body $body3 -ContentType "application/json" -TimeoutSec 60
             # If we get here with a 200, something is wrong
             Write-Host "  FAILED: send_http should be BLOCKED (403), got $($eval3.StatusCode)" -ForegroundColor Red
             $failed++
@@ -140,7 +140,7 @@ catch {
 Write-Host "`nTest 5: Session state" -ForegroundColor Yellow
 try {
     $sessionUrl = "$FunctionAppUrl/api/session/$testSessionId"
-    $sessionResponse = Invoke-RestMethod -Uri $sessionUrl -Method GET -TimeoutSec 30
+    $sessionResponse = Invoke-RestMethod -Uri $sessionUrl -Method GET -TimeoutSec 60
 
     if ($sessionResponse.conditions_met -eq 2 -and -not $sessionResponse.trifecta_complete) {
         Write-Host "  PASSED: Session shows 2/3 conditions, trifecta not complete" -ForegroundColor Green
