@@ -157,7 +157,7 @@ Response (BLOCK - 403):
 **Components:**
 
 - **Trifecta Gate** — Azure Function App with 4 HTTP endpoints
-- **Session Tracker** — In-memory per-session state (resets on cold start)
+- **Session Tracker** — Cosmos DB-backed per-session state (persists across instances)
 - **Policy Engine** — Evaluates Rule of Two, returns ALLOW/BLOCK
 - **Log Analytics** — Custom `TrifectaAudit_CL` table for audit trail
 - **Cosmos DB** — Serverless, stores fake employee records for demo
@@ -228,9 +228,8 @@ Tests: health endpoint, tools list (7 tools), single allow, trifecta block, sess
 
 ## Limitations
 
-- **In-memory session state** — Resets on Function App cold start. Production implementations should use Redis, Cosmos DB, or Durable Entities for durable state.
 - **AuthLevel.ANONYMOUS** — No authentication on endpoints (lab simplicity). Production should use Function keys or Entra ID auth.
-- **Single instance** — Session state is per-instance. With multiple Function App instances, sessions could be split across instances.
+- **Session TTL** — Sessions expire after 24 hours in Cosmos DB. Production implementations may need configurable TTL or explicit session cleanup.
 
 ---
 

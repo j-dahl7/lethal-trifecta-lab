@@ -83,11 +83,9 @@ function Invoke-GateEvaluation {
         }
     }
     catch {
-        $errorResponse = $_.Exception.Response
-        if ($errorResponse -and $errorResponse.StatusCode.value__ -eq 403) {
-            $reader = [System.IO.StreamReader]::new($errorResponse.GetResponseStream())
-            $errorBody = $reader.ReadToEnd() | ConvertFrom-Json
-            $reader.Close()
+        $statusCode = $_.Exception.Response.StatusCode.value__
+        if ($statusCode -eq 403) {
+            $errorBody = $_.ErrorDetails.Message | ConvertFrom-Json
 
             Write-Host "  Status:    403" -ForegroundColor Red
             Write-Host "  Decision:  $($errorBody.decision)" -ForegroundColor Red
