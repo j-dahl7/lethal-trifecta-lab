@@ -78,6 +78,24 @@ resource employeesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/
   }
 }
 
+// Cosmos DB Container - Sessions (for gate session state persistence)
+resource sessionsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2023-11-15' = {
+  parent: cosmosDatabase
+  name: 'sessions'
+  properties: {
+    resource: {
+      id: 'sessions'
+      partitionKey: {
+        paths: [
+          '/session_id'
+        ]
+        kind: 'Hash'
+      }
+      defaultTtl: 86400 // Sessions expire after 24 hours
+    }
+  }
+}
+
 // Key Vault - Contains demo secret (represents private data)
 resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   name: '${projectName}-kv-${suffix}'

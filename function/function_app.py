@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from policy_engine import evaluate
 from tool_registry import get_all_tools, get_conditions_metadata
-from session_tracker import get_session_state, get_all_sessions
+from session_tracker import get_session_state
 from audit import log_gate_decision
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
