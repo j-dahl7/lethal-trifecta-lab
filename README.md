@@ -1,8 +1,12 @@
 # Lethal Trifecta Gate for AI Agents
 
-> **Companion repo for the blog post: [Breaking and Defending the Lethal Trifecta](https://nineliveszerotrust.com/blog/lethal-trifecta/)**
+> **Lab status:** the original “Breaking and Defending the Lethal Trifecta” draft is no longer published on the website. For current agent-security context, see the [Agent 365 Defender playbook](https://nineliveszerotrust.com/blog/agent-365-defender-playbook/).
 
 A serverless gate that enforces the **Rule of Two** — blocking AI agent tool calls that would complete all 3 conditions required for data exfiltration. Implements the lethal trifecta defense pattern: any 2 of 3 conditions are allowed, but the 3rd (which would complete the trifecta) is blocked.
+
+## Verification status
+
+**Last reviewed: 2026-07-10 — local policy and static infrastructure validation; no live deployment.** Python compilation/unit tests, JSON, PowerShell parsing, Bicep compilation, requirement resolution, tool mappings, documentation links, and the local attack demo were reviewed. The Azure deployment, Flex Consumption publish path, Cosmos REST seeding, Data Collection Rule ingestion, and live smoke test were not executed against a subscription during this review.
 
 ## The Problem
 
@@ -30,15 +34,22 @@ Agent Tool Call → Trifecta Gate → ALLOW (200) or BLOCK (403)
 
 The gate tracks which trifecta conditions have been satisfied per session. It allows any combination of 2 conditions but blocks the 3rd call that would complete the trifecta.
 
+Tools not present in `function/tools.json` are blocked by default. This fail-closed behavior prevents a newly introduced or misspelled tool from bypassing condition mapping.
+
 ---
 
 ## Prerequisites
 
-- Azure subscription with Owner access
+- Disposable Azure subscription with Owner access (subscription deployment plus RBAC assignment); use a narrower custom role only if it includes equivalent deployment and role-assignment permissions
 - Azure CLI configured (`az login`)
 - PowerShell 7+ (`pwsh`)
+- Azure Functions Core Tools for the primary publish path; the script attempts Azure CLI zip deployment when Core Tools is absent
 
 No Entra ID setup, Graph API permissions, or directory roles required.
+
+## Cost and safety checkpoint
+
+The lab creates a Flex Consumption Function App, Cosmos DB serverless account, Log Analytics workspace, Application Insights, Storage account, Key Vault, Data Collection Endpoint, and custom log-ingestion resources. Usage can incur charges, and the anonymous endpoint can be abused to generate Function, Cosmos, and logging consumption. The template caps scale at five instances, but you should still deploy only in a disposable subscription, add an Azure budget/alert, and delete the resource group after testing.
 
 ---
 
@@ -95,7 +106,8 @@ The script will:
 | `/api/evaluate` | POST | Core gate — evaluates tool call, returns ALLOW (200) or BLOCK (403) |
 | `/api/session/{id}` | GET | Returns session state (active conditions, count, missing) |
 | `/api/tools` | GET | Returns full tool registry |
-| `/api/health` | GET | Health check |
+| `/api/health` | GET | Process liveness; does not claim dependency readiness |
+| `/api/readiness` | GET | Verifies configured Cosmos DB session storage; returns 503 on failure |
 
 ### Evaluate a Tool Call
 
@@ -156,7 +168,7 @@ Response (BLOCK - 403):
 
 **Components:**
 
-- **Trifecta Gate** — Azure Function App with 4 HTTP endpoints
+- **Trifecta Gate** — Azure Function App with 5 HTTP endpoints
 - **Session Tracker** — Cosmos DB-backed per-session state (persists across instances)
 - **Policy Engine** — Evaluates Rule of Two, returns ALLOW/BLOCK
 - **Log Analytics** — Custom `TrifectaAudit_CL` table for audit trail
@@ -188,15 +200,18 @@ lethal-trifecta-lab/
 │   ├── Attack-Demo.ps1          # Local simulation — no gate
 │   ├── Defense-Demo.ps1         # Live demo — gate blocks 3rd call
 │   └── Test-Lab.ps1             # Smoke tests
-└── function/
-    ├── function_app.py          # HTTP triggers: /evaluate, /session, /tools, /health
-    ├── tool_registry.py         # Load tools.json, get_tool_conditions()
-    ├── session_tracker.py       # Per-session state, would_complete_trifecta()
-    ├── policy_engine.py         # evaluate() → GateResult (ALLOW/BLOCK)
-    ├── audit.py                 # Log to TrifectaAudit_CL via DCR
-    ├── tools.json               # 7 tools mapped to conditions
-    ├── requirements.txt
-    └── host.json
+├── function/
+│   ├── function_app.py          # HTTP triggers, including liveness/readiness
+│   ├── tool_registry.py         # Load tools.json, get_tool_conditions()
+│   ├── session_tracker.py       # Per-session state + readiness
+│   ├── policy_engine.py         # evaluate() → GateResult (ALLOW/BLOCK)
+│   ├── audit.py                 # Log to TrifectaAudit_CL via DCR
+│   ├── tools.json               # 7 tools mapped to conditions
+│   ├── requirements.txt
+│   └── host.json
+└── tests/
+    ├── test_policy_engine.py    # Rule-of-Two + store failure tests
+    └── test_function_app.py     # HTTP 503 + readiness tests
 ```
 
 ---
@@ -222,7 +237,7 @@ Expected output: 3 rows (ALLOW, ALLOW, BLOCK).
 ./scripts/Test-Lab.ps1 -FunctionAppUrl "https://trifecta-lab-gate-XXXXXX.azurewebsites.net"
 ```
 
-Tests: health endpoint, tools list (7 tools), single allow, trifecta block, session state.
+Tests: process liveness, durable Cosmos DB readiness, tools list (7 tools), single allow, trifecta block, and session state.
 
 ---
 
@@ -230,6 +245,10 @@ Tests: health endpoint, tools list (7 tools), single allow, trifecta block, sess
 
 - **AuthLevel.ANONYMOUS** — No authentication on endpoints (lab simplicity). Production should use Function keys or Entra ID auth.
 - **Session TTL** — Sessions expire after 24 hours in Cosmos DB. Production implementations may need configurable TTL or explicit session cleanup.
+- **Concurrency** — Session updates are read/modify/write operations without an application-level transaction. Concurrent calls for one session can race; a production gate needs optimistic concurrency or a transactional state machine.
+- **State failure** — When Cosmos DB is configured but unavailable, evaluation/session requests and `/api/readiness` return `503` instead of silently allowing calls with fresh in-memory state. `/api/health` remains a process-liveness check. In-memory state is used only for an explicitly unconfigured local run.
+- **Authorization and privacy** — The anonymous session endpoint exposes tool history to anyone who can guess a session ID. Never send production tool names, customer identifiers, or sensitive arguments to this lab deployment.
+- **Demonstration scope** — The gate evaluates declared tool categories; it does not inspect tool arguments, destinations, response data, indirect exfiltration, or side effects. It is a policy-pattern demonstration, not a complete agent sandbox.
 
 ---
 
@@ -239,11 +258,13 @@ Tests: health endpoint, tools list (7 tools), single allow, trifecta block, sess
 az group delete --name trifecta-lab-rg --yes
 ```
 
+Resource-group deletion does not immediately purge the soft-deleted Key Vault. Purge it only when the vault is disposable and your recovery requirements allow it. Then review subscription role assignments and cost analysis to confirm no lab resources remain.
+
 ---
 
 ## Resources
 
-- [Blog: Breaking and Defending the Lethal Trifecta](https://nineliveszerotrust.com/blog/lethal-trifecta/)
+- [Agent 365 Defender playbook](https://nineliveszerotrust.com/blog/agent-365-defender-playbook/)
 - [ZSP Azure Lab (companion)](https://github.com/j-dahl7/zsp-azure-lab)
 - [OWASP Top 10 for LLM Applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
 

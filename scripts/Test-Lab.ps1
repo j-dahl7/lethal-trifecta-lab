@@ -5,11 +5,12 @@
 
 .DESCRIPTION
     Tests the following functionality:
-    1. Health endpoint returns 200
-    2. Tools endpoint returns 7 tools
-    3. Single tool call is allowed
-    4. Trifecta sequence is blocked on 3rd call
-    5. Session state shows 2/3 conditions
+    1. Liveness endpoint returns 200
+    2. Readiness confirms the durable Cosmos DB session store
+    3. Tools endpoint returns 7 tools
+    4. Single tool call is allowed
+    5. Trifecta sequence is blocked on 3rd call
+    6. Session state shows 2/3 conditions
 
 .PARAMETER FunctionAppUrl
     Base URL of the Function App.
@@ -34,28 +35,50 @@ Write-Host "`n=== Trifecta Gate Smoke Tests ===" -ForegroundColor Cyan
 $passed = 0
 $failed = 0
 
-# Test 1: Health endpoint
-Write-Host "`nTest 1: Health endpoint" -ForegroundColor Yellow
+# Test 1: Liveness endpoint
+Write-Host "`nTest 1: Liveness endpoint" -ForegroundColor Yellow
 try {
     $healthUrl = "$FunctionAppUrl/api/health"
     $healthResponse = Invoke-RestMethod -Uri $healthUrl -Method GET -TimeoutSec 60
 
     if ($healthResponse.status -eq 'healthy' -and $healthResponse.service -eq 'trifecta-gate') {
-        Write-Host "  PASSED: Health check returned healthy" -ForegroundColor Green
+        Write-Host "  PASSED: Liveness check returned healthy" -ForegroundColor Green
         $passed++
     }
     else {
-        Write-Host "  FAILED: Unexpected health status: $($healthResponse | ConvertTo-Json -Compress)" -ForegroundColor Red
+        Write-Host "  FAILED: Unexpected liveness status: $($healthResponse | ConvertTo-Json -Compress)" -ForegroundColor Red
         $failed++
     }
 }
 catch {
-    Write-Host "  FAILED: Health check error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "  FAILED: Liveness check error: $($_.Exception.Message)" -ForegroundColor Red
     $failed++
 }
 
-# Test 2: Tools endpoint
-Write-Host "`nTest 2: Tools endpoint" -ForegroundColor Yellow
+# Test 2: Durable session-store readiness
+Write-Host "`nTest 2: Durable session-store readiness" -ForegroundColor Yellow
+try {
+    $readinessUrl = "$FunctionAppUrl/api/readiness"
+    $readinessResponse = Invoke-RestMethod -Uri $readinessUrl -Method GET -TimeoutSec 60
+
+    if ($readinessResponse.ready -and
+        $readinessResponse.durable -and
+        $readinessResponse.mode -eq 'cosmos_db') {
+        Write-Host "  PASSED: Cosmos DB session store is ready" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        Write-Host "  FAILED: Durable readiness not confirmed: $($readinessResponse | ConvertTo-Json -Compress)" -ForegroundColor Red
+        $failed++
+    }
+}
+catch {
+    Write-Host "  FAILED: Readiness check error: $($_.Exception.Message)" -ForegroundColor Red
+    $failed++
+}
+
+# Test 3: Tools endpoint
+Write-Host "`nTest 3: Tools endpoint" -ForegroundColor Yellow
 try {
     $toolsUrl = "$FunctionAppUrl/api/tools"
     $toolsResponse = Invoke-RestMethod -Uri $toolsUrl -Method GET -TimeoutSec 60
@@ -74,8 +97,8 @@ catch {
     $failed++
 }
 
-# Test 3: Single tool call allowed
-Write-Host "`nTest 3: Single tool call (ALLOW)" -ForegroundColor Yellow
+# Test 4: Single tool call allowed
+Write-Host "`nTest 4: Single tool call (ALLOW)" -ForegroundColor Yellow
 $testSessionId = "smoke-test-$(Get-Date -Format 'yyyyMMddHHmmss')"
 try {
     $evaluateUrl = "$FunctionAppUrl/api/evaluate"
@@ -96,8 +119,8 @@ catch {
     $failed++
 }
 
-# Test 4: Trifecta block on 3rd call
-Write-Host "`nTest 4: Trifecta block sequence" -ForegroundColor Yellow
+# Test 5: Trifecta block on 3rd call
+Write-Host "`nTest 5: Trifecta block sequence" -ForegroundColor Yellow
 try {
     # Second call - untrusted_content (should be ALLOW)
     $body2 = @{ session_id = $testSessionId; tool_name = "process_document" } | ConvertTo-Json
@@ -136,8 +159,8 @@ catch {
     $failed++
 }
 
-# Test 5: Session state
-Write-Host "`nTest 5: Session state" -ForegroundColor Yellow
+# Test 6: Session state
+Write-Host "`nTest 6: Session state" -ForegroundColor Yellow
 try {
     $sessionUrl = "$FunctionAppUrl/api/session/$testSessionId"
     $sessionResponse = Invoke-RestMethod -Uri $sessionUrl -Method GET -TimeoutSec 60

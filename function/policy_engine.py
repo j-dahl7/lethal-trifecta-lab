@@ -48,14 +48,15 @@ def evaluate(session_id: str, tool_name: str) -> GateResult:
     state_before = get_session_state(session_id)
     conditions_before = state_before["active_conditions"]
 
-    # Unknown tools are allowed (they don't map to any condition)
+    # Fail closed: an unregistered tool has no reviewed condition mapping and
+    # could otherwise bypass the gate entirely.
     if not is_known_tool(tool_name):
-        logging.info(f"Unknown tool '{tool_name}' allowed (no condition mapping)")
+        logging.warning(f"Unknown tool '{tool_name}' blocked (no condition mapping)")
         return GateResult(
-            decision="ALLOW",
+            decision="BLOCK",
             tool_name=tool_name,
             condition=None,
-            reason=f"Tool '{tool_name}' is not in the registry; no condition applies",
+            reason=f"Tool '{tool_name}' is not in the reviewed registry; blocked by default",
             session_id=session_id,
             conditions_before=conditions_before,
             conditions_after=conditions_before,

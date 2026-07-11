@@ -117,31 +117,50 @@ if (-not $keys) {
 $cosmosKey = $keys.primaryMasterKey
 $cosmosEndpoint = (az cosmosdb show --name $CosmosAccountName --resource-group $ResourceGroupName --query documentEndpoint -o tsv 2>$null)
 
+function Write-CosmosDocument {
+    param(
+        [Parameter(Mandatory)][hashtable]$Document,
+        [Parameter(Mandatory)][string]$Department
+    )
+
+    $verb = 'post'
+    $resourceType = 'docs'
+    $resourceLink = "dbs/$DatabaseName/colls/$ContainerName"
+    $date = [DateTime]::UtcNow.ToString('r', [Globalization.CultureInfo]::InvariantCulture)
+    $stringToSign = "$verb`n$resourceType`n$resourceLink`n$($date.ToLowerInvariant())`n`n"
+    $hmac = [Security.Cryptography.HMACSHA256]::new([Convert]::FromBase64String($cosmosKey))
+    try {
+        $signatureBytes = $hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($stringToSign))
+    }
+    finally {
+        $hmac.Dispose()
+    }
+
+    $signature = [Convert]::ToBase64String($signatureBytes)
+    $authorization = [Uri]::EscapeDataString("type=master&ver=1.0&sig=$signature")
+    $partitionKey = ConvertTo-Json -Compress -InputObject ([string[]]@($Department))
+    $headers = @{
+        Authorization = $authorization
+        'x-ms-date' = $date
+        'x-ms-version' = '2018-12-31'
+        'x-ms-documentdb-partitionkey' = $partitionKey
+        'x-ms-documentdb-is-upsert' = 'true'
+    }
+
+    Invoke-RestMethod `
+        -Uri "$($cosmosEndpoint.TrimEnd('/'))/$resourceLink/docs" `
+        -Method Post `
+        -Headers $headers `
+        -ContentType 'application/json' `
+        -Body ($Document | ConvertTo-Json -Compress) | Out-Null
+}
+
 $inserted = 0
 foreach ($emp in $employees) {
-    $body = $emp | ConvertTo-Json -Compress
-
     Write-Host "  Inserting $($emp.name) ($($emp.department))..." -ForegroundColor Cyan
 
-    # Use az cosmosdb sql container create-item (or REST API)
     try {
-        az cosmosdb sql database container-item create `
-            --account-name $CosmosAccountName `
-            --resource-group $ResourceGroupName `
-            --database-name $DatabaseName `
-            --container-name $ContainerName `
-            --body $body `
-            --output none 2>$null
-
-        if ($LASTEXITCODE -ne 0) {
-            # Fallback: use REST API via az rest
-            $partitionKey = "[`"$($emp.department)`"]"
-            az rest --method POST `
-                --uri "$cosmosEndpoint/dbs/$DatabaseName/colls/$ContainerName/docs" `
-                --headers "Content-Type=application/json" "x-ms-version=2018-12-31" "x-ms-documentdb-partitionkey=$partitionKey" `
-                --body $body `
-                --output none 2>$null
-        }
+        Write-CosmosDocument -Document $emp -Department $emp.department
 
         $inserted++
         Write-Host "    Inserted" -ForegroundColor Green
@@ -154,4 +173,10 @@ foreach ($emp in $employees) {
 
 Write-Host ""
 Write-Host "Seeded $inserted/$($employees.Count) employee records" -ForegroundColor $(if ($inserted -eq $employees.Count) { 'Green' } else { 'Yellow' })
+
+if ($inserted -ne $employees.Count) {
+    Write-Error "Cosmos DB seeding was incomplete. $($employees.Count - $inserted) record(s) failed; review the errors above and retry." -ErrorAction Continue
+    exit 1
+}
+
 exit 0

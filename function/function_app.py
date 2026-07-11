@@ -9,20 +9,28 @@ Endpoints:
   POST /api/evaluate     - Evaluate a tool call (core gate)
   GET  /api/session/{id} - Get session state
   GET  /api/tools        - List tool registry
-  GET  /api/health       - Health check
+  GET  /api/health       - Process liveness check
+  GET  /api/readiness    - Durable session-store readiness check
 """
 
 import azure.functions as func
 import logging
 import json
+import re
 from datetime import datetime, timezone
 
 from policy_engine import evaluate
 from tool_registry import get_all_tools, get_conditions_metadata
-from session_tracker import get_session_state
+from session_tracker import (
+    get_session_state,
+    check_session_store_ready,
+    SessionStoreUnavailable,
+)
 from audit import log_gate_decision
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+TOOL_NAME_PATTERN = re.compile(r"^[a-z0-9_-]{1,64}$")
 
 
 # =============================================================================
@@ -53,6 +61,13 @@ async def evaluate_tool_call(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
+    if not isinstance(body, dict):
+        return func.HttpResponse(
+            json.dumps({"error": "JSON body must be an object"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
     # Validate required fields
     missing = [f for f in ["session_id", "tool_name"] if f not in body]
     if missing:
@@ -65,8 +80,29 @@ async def evaluate_tool_call(req: func.HttpRequest) -> func.HttpResponse:
     session_id = body["session_id"]
     tool_name = body["tool_name"]
 
+    if not isinstance(session_id, str) or not SESSION_ID_PATTERN.fullmatch(session_id):
+        return func.HttpResponse(
+            json.dumps({"error": "session_id must be 1-128 safe identifier characters"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+    if not isinstance(tool_name, str) or not TOOL_NAME_PATTERN.fullmatch(tool_name):
+        return func.HttpResponse(
+            json.dumps({"error": "tool_name must be 1-64 lowercase identifier characters"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
     # Evaluate against policy
-    result = evaluate(session_id, tool_name)
+    try:
+        result = evaluate(session_id, tool_name)
+    except SessionStoreUnavailable:
+        logging.exception("Configured durable session store is unavailable")
+        return func.HttpResponse(
+            json.dumps({"error": "Session store unavailable; request denied"}),
+            status_code=503,
+            mimetype="application/json",
+        )
 
     # Audit log (fire and forget)
     await log_gate_decision(
@@ -104,7 +140,22 @@ def get_session(req: func.HttpRequest) -> func.HttpResponse:
             mimetype="application/json",
         )
 
-    state = get_session_state(session_id)
+    if not SESSION_ID_PATTERN.fullmatch(session_id):
+        return func.HttpResponse(
+            json.dumps({"error": "invalid session_id"}),
+            status_code=400,
+            mimetype="application/json",
+        )
+
+    try:
+        state = get_session_state(session_id)
+    except SessionStoreUnavailable:
+        logging.exception("Configured durable session store is unavailable")
+        return func.HttpResponse(
+            json.dumps({"error": "Session store unavailable"}),
+            status_code=503,
+            mimetype="application/json",
+        )
 
     return func.HttpResponse(
         json.dumps(state),
@@ -140,9 +191,46 @@ def health_check(req: func.HttpRequest) -> func.HttpResponse:
     return func.HttpResponse(
         json.dumps({
             "status": "healthy",
+            "check": "liveness",
             "service": "trifecta-gate",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "version": "1.0.0",
+        }),
+        status_code=200,
+        mimetype="application/json",
+    )
+
+
+# =============================================================================
+# GET /api/readiness - Session-store readiness endpoint
+# =============================================================================
+
+@app.route(route="api/readiness", methods=["GET"])
+def readiness_check(req: func.HttpRequest) -> func.HttpResponse:
+    """Return 503 when configured durable state cannot be reached."""
+    try:
+        store = check_session_store_ready()
+    except SessionStoreUnavailable:
+        logging.exception("Session-store readiness check failed")
+        return func.HttpResponse(
+            json.dumps({
+                "status": "not_ready",
+                "ready": False,
+                "service": "trifecta-gate",
+                "mode": "cosmos_db",
+                "durable": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }),
+            status_code=503,
+            mimetype="application/json",
+        )
+
+    return func.HttpResponse(
+        json.dumps({
+            "status": "ready",
+            "service": "trifecta-gate",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            **store,
         }),
         status_code=200,
         mimetype="application/json",

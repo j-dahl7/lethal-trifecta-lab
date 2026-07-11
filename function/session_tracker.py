@@ -2,8 +2,9 @@
 Session Tracker - Per-session state tracking for the Lethal Trifecta gate.
 
 Tracks which trifecta conditions have been satisfied in each session.
-Uses Cosmos DB for persistence across Function App instances.
-Falls back to in-memory storage if Cosmos DB is not configured or unavailable.
+Uses Cosmos DB for persistence across Function App instances. Falls back to
+in-memory storage only when Cosmos DB is not configured; a configured store
+failure is surfaced so the gate can fail closed.
 """
 
 import logging
@@ -15,26 +16,32 @@ ALL_CONDITIONS = frozenset(["private_data", "untrusted_content", "exfiltration_v
 # Cosmos DB client (lazy init)
 _cosmos_container = None
 _cosmos_initialized = False
+_cosmos_init_error = None
 
 # In-memory fallback
 _sessions: dict[str, dict] = {}
 
 
+class SessionStoreUnavailable(RuntimeError):
+    """Raised when configured durable state cannot be read or written safely."""
+
+
 def _get_cosmos_container():
     """Get or create the Cosmos DB sessions container client."""
-    global _cosmos_container, _cosmos_initialized
+    global _cosmos_container, _cosmos_initialized, _cosmos_init_error
+
+    endpoint = os.environ.get("COSMOS_ENDPOINT")
+    if not endpoint:
+        return None
 
     if _cosmos_initialized:
+        if _cosmos_init_error is not None:
+            raise SessionStoreUnavailable("Cosmos DB session store initialization failed") from _cosmos_init_error
         return _cosmos_container
 
     _cosmos_initialized = True
-    endpoint = os.environ.get("COSMOS_ENDPOINT")
     database_name = os.environ.get("COSMOS_DATABASE_NAME", "trifecta-db")
     key = os.environ.get("COSMOS_KEY")
-
-    if not endpoint:
-        logging.warning("COSMOS_ENDPOINT not set, using in-memory session state")
-        return None
 
     try:
         from azure.cosmos import CosmosClient
@@ -51,16 +58,16 @@ def _get_cosmos_container():
         return _cosmos_container
     except Exception as e:
         logging.error(f"Failed to initialize Cosmos DB session store: {e}")
-        return None
+        _cosmos_init_error = e
+        raise SessionStoreUnavailable("Cosmos DB session store initialization failed") from e
 
 
 def _load_session(session_id: str) -> dict | None:
     """Load session from Cosmos DB, or from in-memory fallback."""
     container = _get_cosmos_container()
 
-    if container:
+    if container is not None:
         try:
-            from azure.cosmos import exceptions as cosmos_exceptions
             item = container.read_item(item=session_id, partition_key=session_id)
             item["active_conditions"] = set(item.get("active_conditions", []))
             return item
@@ -69,7 +76,7 @@ def _load_session(session_id: str) -> dict | None:
             if hasattr(e, 'status_code') and e.status_code == 404:
                 return None
             logging.error(f"Failed to load session {session_id}: {e}")
-            return None
+            raise SessionStoreUnavailable("Unable to read durable session state") from e
 
     # In-memory fallback
     return _sessions.get(session_id)
@@ -79,7 +86,7 @@ def _save_session(session: dict):
     """Save session to Cosmos DB, or to in-memory fallback."""
     container = _get_cosmos_container()
 
-    if container:
+    if container is not None:
         try:
             doc = {
                 "id": session["session_id"],
@@ -92,6 +99,7 @@ def _save_session(session: dict):
             container.upsert_item(doc)
         except Exception as e:
             logging.error(f"Failed to save session {session['session_id']}: {e}")
+            raise SessionStoreUnavailable("Unable to persist durable session state") from e
         return
 
     # In-memory fallback
@@ -156,4 +164,32 @@ def get_session_state(session_id: str) -> dict:
         "call_count": session["call_count"],
         "tool_history": session["tool_history"],
         "created_at": session["created_at"],
+    }
+
+
+def check_session_store_ready() -> dict:
+    """Verify that the configured session store is reachable.
+
+    An explicitly unconfigured local run is ready in in-memory mode. Once a
+    Cosmos endpoint is configured, readiness requires a successful container
+    metadata read and never falls back to memory.
+    """
+    container = _get_cosmos_container()
+    if container is None:
+        return {
+            "ready": True,
+            "mode": "in_memory",
+            "durable": False,
+        }
+
+    try:
+        container.read()
+    except Exception as e:
+        logging.error(f"Cosmos DB session store readiness check failed: {e}")
+        raise SessionStoreUnavailable("Durable session store is not ready") from e
+
+    return {
+        "ready": True,
+        "mode": "cosmos_db",
+        "durable": True,
     }
