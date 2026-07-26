@@ -1,157 +1,103 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Seeds Cosmos DB with fake employee records for the demo.
-
-.DESCRIPTION
-    Inserts ~6 fake employee records into the Cosmos DB employees container.
-    These represent the private data that the trifecta attack targets.
-
-.PARAMETER CosmosAccountName
-    Name of the Cosmos DB account.
-
-.PARAMETER ResourceGroupName
-    Name of the resource group.
-
-.PARAMETER DatabaseName
-    Cosmos DB database name. Default: trifecta-db
-
-.PARAMETER ContainerName
-    Cosmos DB container name. Default: employees
+    Idempotently seeds clearly synthetic employee records using Entra authentication.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
     [string]$CosmosAccountName,
 
     [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
     [string]$ResourceGroupName,
 
     [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$DatabaseName = 'trifecta-db',
 
     [Parameter()]
-    [string]$ContainerName = 'employees'
+    [ValidateNotNullOrEmpty()]
+    [string]$ContainerName = 'employees',
+
+    [Parameter()]
+    [ValidateRange(1, 30)]
+    [int]$MaxRetries = 12,
+
+    [Parameter()]
+    [ValidateRange(1, 60)]
+    [int]$RetryDelaySeconds = 10
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-Write-Host "Seeding Cosmos DB with demo employee data..." -ForegroundColor Yellow
-
-# Fake employee records
 $employees = @(
-    @{
-        id = "emp-001"
-        name = "Alice Johnson"
-        email = "alice.johnson@contoso.com"
-        department = "Engineering"
-        title = "Senior Software Engineer"
-        salary = 145000
-        ssn = "123-45-6789"
-        phone = "555-0101"
-    }
-    @{
-        id = "emp-002"
-        name = "Bob Martinez"
-        email = "bob.martinez@contoso.com"
-        department = "Engineering"
-        title = "DevOps Lead"
-        salary = 155000
-        ssn = "234-56-7890"
-        phone = "555-0102"
-    }
-    @{
-        id = "emp-003"
-        name = "Carol Chen"
-        email = "carol.chen@contoso.com"
-        department = "Finance"
-        title = "Financial Analyst"
-        salary = 120000
-        ssn = "345-67-8901"
-        phone = "555-0103"
-    }
-    @{
-        id = "emp-004"
-        name = "David Kim"
-        email = "david.kim@contoso.com"
-        department = "Finance"
-        title = "VP of Finance"
-        salary = 210000
-        ssn = "456-78-9012"
-        phone = "555-0104"
-    }
-    @{
-        id = "emp-005"
-        name = "Eva Rodriguez"
-        email = "eva.rodriguez@contoso.com"
-        department = "Security"
-        title = "Security Engineer"
-        salary = 160000
-        ssn = "567-89-0123"
-        phone = "555-0105"
-    }
-    @{
-        id = "emp-006"
-        name = "Frank Thompson"
-        email = "frank.thompson@contoso.com"
-        department = "Security"
-        title = "CISO"
-        salary = 250000
-        ssn = "678-90-1234"
-        phone = "555-0106"
-    }
+    @{ id='emp-001'; name='Alice Example'; email='alice@example.invalid'; department='Engineering'; title='Synthetic Engineer'; salary=101001; ssn='000-00-0001'; phone='555-0101' }
+    @{ id='emp-002'; name='Bob Example'; email='bob@example.invalid'; department='Engineering'; title='Synthetic DevOps Lead'; salary=101002; ssn='000-00-0002'; phone='555-0102' }
+    @{ id='emp-003'; name='Carol Example'; email='carol@example.invalid'; department='Finance'; title='Synthetic Analyst'; salary=101003; ssn='000-00-0003'; phone='555-0103' }
+    @{ id='emp-004'; name='David Example'; email='david@example.invalid'; department='Finance'; title='Synthetic Finance Lead'; salary=101004; ssn='000-00-0004'; phone='555-0104' }
+    @{ id='emp-005'; name='Eva Example'; email='eva@example.invalid'; department='Security'; title='Synthetic Security Engineer'; salary=101005; ssn='000-00-0005'; phone='555-0105' }
+    @{ id='emp-006'; name='Frank Example'; email='frank@example.invalid'; department='Security'; title='Synthetic Security Lead'; salary=101006; ssn='000-00-0006'; phone='555-0106' }
 )
 
-# Get Cosmos DB key
-Write-Host "  Retrieving Cosmos DB key..." -ForegroundColor Cyan
-$keys = az cosmosdb keys list `
+$endpoint = az cosmosdb show `
     --name $CosmosAccountName `
     --resource-group $ResourceGroupName `
-    --output json 2>$null | ConvertFrom-Json
-
-if (-not $keys) {
-    throw "Failed to retrieve Cosmos DB keys"
+    --query documentEndpoint `
+    --output tsv `
+    --only-show-errors
+if (-not $endpoint -or $endpoint -notmatch '^https://[^/]+\.documents\.azure\.com(?::\d+)?/?$') {
+    throw 'Cosmos DB returned an invalid document endpoint.'
 }
 
-$cosmosKey = $keys.primaryMasterKey
-$cosmosEndpoint = (az cosmosdb show --name $CosmosAccountName --resource-group $ResourceGroupName --query documentEndpoint -o tsv 2>$null)
+$accessToken = az account get-access-token `
+    --resource 'https://cosmos.azure.com/' `
+    --query accessToken `
+    --output tsv `
+    --only-show-errors
+if (-not $accessToken) {
+    throw 'Could not acquire a Cosmos DB data-plane token.'
+}
+$authorization = [uri]::EscapeDataString("type=aad&ver=1.0&sig=$accessToken")
+Remove-Variable accessToken
+$documentsUri = "$($endpoint.TrimEnd('/'))/dbs/$DatabaseName/colls/$ContainerName/docs"
 
-$inserted = 0
-foreach ($emp in $employees) {
-    $body = $emp | ConvertTo-Json -Compress
-
-    Write-Host "  Inserting $($emp.name) ($($emp.department))..." -ForegroundColor Cyan
-
-    # Use az cosmosdb sql container create-item (or REST API)
-    try {
-        az cosmosdb sql database container-item create `
-            --account-name $CosmosAccountName `
-            --resource-group $ResourceGroupName `
-            --database-name $DatabaseName `
-            --container-name $ContainerName `
-            --body $body `
-            --output none 2>$null
-
-        if ($LASTEXITCODE -ne 0) {
-            # Fallback: use REST API via az rest
-            $partitionKey = "[`"$($emp.department)`"]"
-            az rest --method POST `
-                --uri "$cosmosEndpoint/dbs/$DatabaseName/colls/$ContainerName/docs" `
-                --headers "Content-Type=application/json" "x-ms-version=2018-12-31" "x-ms-documentdb-partitionkey=$partitionKey" `
-                --body $body `
-                --output none 2>$null
+Write-Host 'Seeding six clearly synthetic employee records...' -ForegroundColor Yellow
+foreach ($employee in $employees) {
+    $body = $employee | ConvertTo-Json -Compress
+    $succeeded = $false
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        $headers = @{
+            Authorization = $authorization
+            'x-ms-date' = [DateTime]::UtcNow.ToString('R')
+            'x-ms-version' = '2018-12-31'
+            'x-ms-documentdb-partitionkey' = ('["{0}"]' -f $employee.department)
+            'x-ms-documentdb-is-upsert' = 'true'
         }
-
-        $inserted++
-        Write-Host "    Inserted" -ForegroundColor Green
+        try {
+            $null = Invoke-RestMethod `
+                -Uri $documentsUri `
+                -Method Post `
+                -Headers $headers `
+                -Body $body `
+                -ContentType 'application/json' `
+                -TimeoutSec 30
+            $succeeded = $true
+            break
+        }
+        catch {
+            if ($attempt -eq $MaxRetries) {
+                throw "Failed to seed synthetic record '$($employee.id)' after $MaxRetries attempts: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds $RetryDelaySeconds
+        }
     }
-    catch {
-        Write-Host "    Warning: $($_.Exception.Message)" -ForegroundColor Yellow
-        # Continue with remaining records
+    if (-not $succeeded) {
+        throw "Failed to seed synthetic record '$($employee.id)'."
     }
 }
 
-Write-Host ""
-Write-Host "Seeded $inserted/$($employees.Count) employee records" -ForegroundColor $(if ($inserted -eq $employees.Count) { 'Green' } else { 'Yellow' })
-exit 0
+Write-Host 'Synthetic employee records seeded successfully.' -ForegroundColor Green

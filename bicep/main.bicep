@@ -14,8 +14,12 @@ param projectName string = 'trifecta-lab'
 @description('Azure region for all resources')
 param location string = 'eastus'
 
-@description('Principal ID of the deployer (for Key Vault admin access)')
+@description('Principal ID of the deployer for scoped Key Vault secret and Cosmos seed access')
 param deployerPrincipalId string
+
+@secure()
+@description('Generated synthetic secret used only to demonstrate private-data storage')
+param demoSecretValue string = newGuid()
 
 @description('Additional tags for all resources')
 param tags object = {}
@@ -24,11 +28,12 @@ param tags object = {}
 resource resourceGroup 'Microsoft.Resources/resourceGroups@2023-07-01' = {
   name: '${projectName}-rg'
   location: location
-  tags: union({
+  tags: union(tags, {
     project: projectName
     environment: 'lab'
     purpose: 'lethal-trifecta-demo'
-  }, tags)
+    'nlzt-owner': 'lethal-trifecta-lab'
+  })
 }
 
 // Monitoring Module - Deploy first as other modules depend on Log Analytics
@@ -50,6 +55,7 @@ module core 'modules/core.bicep' = {
     projectName: projectName
     location: location
     deployerPrincipalId: deployerPrincipalId
+    demoSecretValue: demoSecretValue
     tags: tags
   }
 }
@@ -62,7 +68,19 @@ module function 'modules/function.bicep' = {
     projectName: projectName
     location: location
     logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
+    cosmosEndpoint: core.outputs.cosmosAccountEndpoint
     tags: tags
+  }
+}
+
+// Data-plane roles are scoped to only the two containers each principal needs.
+module permissions 'modules/permissions.bicep' = {
+  name: 'data-plane-permissions-deployment'
+  scope: resourceGroup
+  params: {
+    cosmosAccountName: core.outputs.cosmosAccountName
+    functionAppPrincipalId: function.outputs.functionAppPrincipalId
+    deployerPrincipalId: deployerPrincipalId
   }
 }
 

@@ -1,167 +1,96 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Runs smoke tests on the deployed Trifecta Gate.
-
-.DESCRIPTION
-    Tests the following functionality:
-    1. Health endpoint returns 200
-    2. Tools endpoint returns 7 tools
-    3. Single tool call is allowed
-    4. Trifecta sequence is blocked on 3rd call
-    5. Session state shows 2/3 conditions
-
-.PARAMETER FunctionAppUrl
-    Base URL of the Function App.
-
-.EXAMPLE
-    ./Test-Lab.ps1 -FunctionAppUrl "https://trifecta-lab-gate-abc123.azurewebsites.net"
+    Runs authenticated end-to-end smoke tests against the deployed gate.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [string]$FunctionAppUrl
+    [ValidatePattern('^https://[^/]+$')]
+    [string]$FunctionAppUrl,
+
+    [Parameter(Mandatory)]
+    [SecureString]$FunctionKey
 )
 
 $ErrorActionPreference = 'Stop'
-
-# Trim trailing slash
 $FunctionAppUrl = $FunctionAppUrl.TrimEnd('/')
-
-Write-Host "`n=== Trifecta Gate Smoke Tests ===" -ForegroundColor Cyan
-
-$passed = 0
-$failed = 0
-
-# Test 1: Health endpoint
-Write-Host "`nTest 1: Health endpoint" -ForegroundColor Yellow
+$keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($FunctionKey)
 try {
-    $healthUrl = "$FunctionAppUrl/api/health"
-    $healthResponse = Invoke-RestMethod -Uri $healthUrl -Method GET -TimeoutSec 60
-
-    if ($healthResponse.status -eq 'healthy' -and $healthResponse.service -eq 'trifecta-gate') {
-        Write-Host "  PASSED: Health check returned healthy" -ForegroundColor Green
-        $passed++
-    }
-    else {
-        Write-Host "  FAILED: Unexpected health status: $($healthResponse | ConvertTo-Json -Compress)" -ForegroundColor Red
-        $failed++
-    }
+    $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
+    $authHeaders = @{ 'x-functions-key' = $plainKey }
 }
-catch {
-    Write-Host "  FAILED: Health check error: $($_.Exception.Message)" -ForegroundColor Red
-    $failed++
+finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPointer)
+    Remove-Variable plainKey -ErrorAction SilentlyContinue
 }
 
-# Test 2: Tools endpoint
-Write-Host "`nTest 2: Tools endpoint" -ForegroundColor Yellow
+function Invoke-Gate {
+    param([string]$ToolName, [string]$SessionId)
+    $body = @{ session_id=$SessionId; tool_name=$ToolName } | ConvertTo-Json -Compress
+    $response = Invoke-WebRequest `
+        -Uri "$FunctionAppUrl/api/evaluate" `
+        -Method Post `
+        -Headers $authHeaders `
+        -Body $body `
+        -ContentType 'application/json' `
+        -TimeoutSec 60 `
+        -SkipHttpErrorCheck
+    return [pscustomobject]@{
+        StatusCode = $response.StatusCode
+        Body = $response.Content | ConvertFrom-Json
+    }
+}
+
 try {
-    $toolsUrl = "$FunctionAppUrl/api/tools"
-    $toolsResponse = Invoke-RestMethod -Uri $toolsUrl -Method GET -TimeoutSec 60
-
-    if ($toolsResponse.tools.Count -eq 7) {
-        Write-Host "  PASSED: Returned 7 tools" -ForegroundColor Green
-        $passed++
-    }
-    else {
-        Write-Host "  FAILED: Expected 7 tools, got $($toolsResponse.tools.Count)" -ForegroundColor Red
-        $failed++
-    }
-}
-catch {
-    Write-Host "  FAILED: Tools endpoint error: $($_.Exception.Message)" -ForegroundColor Red
-    $failed++
-}
-
-# Test 3: Single tool call allowed
-Write-Host "`nTest 3: Single tool call (ALLOW)" -ForegroundColor Yellow
-$testSessionId = "smoke-test-$(Get-Date -Format 'yyyyMMddHHmmss')"
-try {
-    $evaluateUrl = "$FunctionAppUrl/api/evaluate"
-    $body = @{ session_id = $testSessionId; tool_name = "read_db" } | ConvertTo-Json
-    $evalResponse = Invoke-RestMethod -Uri $evaluateUrl -Method POST -Body $body -ContentType "application/json" -TimeoutSec 60
-
-    if ($evalResponse.decision -eq 'ALLOW') {
-        Write-Host "  PASSED: read_db allowed (1/3 conditions)" -ForegroundColor Green
-        $passed++
-    }
-    else {
-        Write-Host "  FAILED: Expected ALLOW, got $($evalResponse.decision)" -ForegroundColor Red
-        $failed++
-    }
-}
-catch {
-    Write-Host "  FAILED: Evaluate error: $($_.Exception.Message)" -ForegroundColor Red
-    $failed++
-}
-
-# Test 4: Trifecta block on 3rd call
-Write-Host "`nTest 4: Trifecta block sequence" -ForegroundColor Yellow
-try {
-    # Second call - untrusted_content (should be ALLOW)
-    $body2 = @{ session_id = $testSessionId; tool_name = "process_document" } | ConvertTo-Json
-    $eval2 = Invoke-RestMethod -Uri $evaluateUrl -Method POST -Body $body2 -ContentType "application/json" -TimeoutSec 60
-
-    if ($eval2.decision -ne 'ALLOW') {
-        Write-Host "  FAILED: process_document should be ALLOW, got $($eval2.decision)" -ForegroundColor Red
-        $failed++
-    }
-    else {
-        # Third call - exfiltration_vector (should be BLOCK)
-        $body3 = @{ session_id = $testSessionId; tool_name = "send_http" } | ConvertTo-Json
-        $blocked = $false
-
-        try {
-            $eval3 = Invoke-WebRequest -Uri $evaluateUrl -Method POST -Body $body3 -ContentType "application/json" -TimeoutSec 60
-            # If we get here with a 200, something is wrong
-            Write-Host "  FAILED: send_http should be BLOCKED (403), got $($eval3.StatusCode)" -ForegroundColor Red
-            $failed++
+    $health = $null
+    for ($attempt = 1; $attempt -le 18; $attempt++) {
+        $healthResponse = Invoke-WebRequest `
+            -Uri "$FunctionAppUrl/api/health" `
+            -Method Get `
+            -TimeoutSec 60 `
+            -SkipHttpErrorCheck
+        $health = $healthResponse.Content | ConvertFrom-Json
+        if ($healthResponse.StatusCode -eq 200 -and $health.status -eq 'healthy') { break }
+        if ($attempt -eq 18) {
+            throw "Health endpoint did not become ready: $($healthResponse.Content)"
         }
-        catch {
-            if ($_.Exception.Response.StatusCode.value__ -eq 403) {
-                Write-Host "  PASSED: send_http blocked with 403 (trifecta prevented)" -ForegroundColor Green
-                $passed++
-                $blocked = $true
-            }
-            else {
-                Write-Host "  FAILED: Expected 403, got error: $($_.Exception.Message)" -ForegroundColor Red
-                $failed++
-            }
-        }
+        Start-Sleep -Seconds 10
     }
-}
-catch {
-    Write-Host "  FAILED: Trifecta block sequence error: $($_.Exception.Message)" -ForegroundColor Red
-    $failed++
-}
 
-# Test 5: Session state
-Write-Host "`nTest 5: Session state" -ForegroundColor Yellow
-try {
-    $sessionUrl = "$FunctionAppUrl/api/session/$testSessionId"
-    $sessionResponse = Invoke-RestMethod -Uri $sessionUrl -Method GET -TimeoutSec 60
+    $tools = Invoke-RestMethod `
+        -Uri "$FunctionAppUrl/api/tools" `
+        -Method Get `
+        -Headers $authHeaders `
+        -TimeoutSec 60
+    if ($tools.tools.Count -ne 7) { throw 'Authenticated registry did not return seven tools.' }
 
-    if ($sessionResponse.conditions_met -eq 2 -and -not $sessionResponse.trifecta_complete) {
-        Write-Host "  PASSED: Session shows 2/3 conditions, trifecta not complete" -ForegroundColor Green
-        $passed++
+    $sessionId = "smoke-$([guid]::NewGuid())"
+    $first = Invoke-Gate -ToolName 'read_db' -SessionId $sessionId
+    $second = Invoke-Gate -ToolName 'process_document' -SessionId $sessionId
+    $third = Invoke-Gate -ToolName 'send_http' -SessionId $sessionId
+    if ($first.StatusCode -ne 200 -or $first.Body.decision -ne 'ALLOW') {
+        throw 'First registered condition was not allowed.'
     }
-    else {
-        Write-Host "  FAILED: Expected 2/3 conditions, got $($sessionResponse.conditions_met)/3 (complete: $($sessionResponse.trifecta_complete))" -ForegroundColor Red
-        $failed++
+    if ($second.StatusCode -ne 200 -or $second.Body.decision -ne 'ALLOW') {
+        throw 'Second registered condition was not allowed.'
     }
-}
-catch {
-    Write-Host "  FAILED: Session state error: $($_.Exception.Message)" -ForegroundColor Red
-    $failed++
-}
+    if ($third.StatusCode -ne 403 -or $third.Body.decision -ne 'BLOCK') {
+        throw 'Third condition was not blocked with HTTP 403.'
+    }
 
-# Summary
-Write-Host "`n=== Test Summary ===" -ForegroundColor Cyan
-Write-Host "Passed: $passed" -ForegroundColor Green
-Write-Host "Failed: $failed" -ForegroundColor $(if ($failed -gt 0) { 'Red' } else { 'Green' })
-
-if ($failed -gt 0) {
-    exit 1
+    $session = Invoke-RestMethod `
+        -Uri "$FunctionAppUrl/api/session/$sessionId" `
+        -Method Get `
+        -Headers $authHeaders `
+        -TimeoutSec 60
+    if ($session.conditions_met -ne 2 -or $session.trifecta_complete) {
+        throw 'Persisted session state was not the expected safe 2/3 state.'
+    }
+    Write-Host 'Authenticated smoke tests passed.' -ForegroundColor Green
 }
-exit 0
+finally {
+    $authHeaders['x-functions-key'] = $null
+    Remove-Variable authHeaders -ErrorAction SilentlyContinue
+}

@@ -1,78 +1,64 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Grants Monitoring Metrics Publisher role to the Function App managed identity on the DCR.
-
-.DESCRIPTION
-    Unlike the ZSP lab, the Trifecta lab only needs a single RBAC permission:
-    - Monitoring Metrics Publisher on the Data Collection Rule (for audit log ingestion)
-
-    No Graph API permissions or Entra ID setup required.
-
-.PARAMETER FunctionAppPrincipalId
-    Object ID of the Function App's managed identity.
-
-.PARAMETER DcrScope
-    Resource ID of the Data Collection Rule.
-
-.PARAMETER MaxRetries
-    Maximum retry attempts for propagation delays. Default: 5
-
-.PARAMETER RetryDelaySeconds
-    Seconds to wait between retries. Default: 10
+    Grants DCR-scoped ingestion permission to the Function App identity.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string]$FunctionAppPrincipalId,
 
     [Parameter(Mandatory)]
+    [ValidatePattern('^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.Insights/dataCollectionRules/[^/]+$')]
     [string]$DcrScope,
 
     [Parameter()]
-    [int]$MaxRetries = 5,
+    [ValidateRange(1, 30)]
+    [int]$MaxRetries = 12,
 
     [Parameter()]
+    [ValidateRange(1, 60)]
     [int]$RetryDelaySeconds = 10
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
+$MonitoringMetricsPublisherRoleId = '3913510d-42f4-4e42-8a64-420c390055eb'
 
-Write-Host "Granting permissions to Function App managed identity..." -ForegroundColor Yellow
+Write-Host "Granting DCR-scoped audit ingestion permission..." -ForegroundColor Yellow
+$existing = @(
+    az role assignment list `
+        --assignee $FunctionAppPrincipalId `
+        --scope $DcrScope `
+        --role $MonitoringMetricsPublisherRoleId `
+        --output json `
+        --only-show-errors | ConvertFrom-Json
+)
 
-# Grant Monitoring Metrics Publisher on DCR (for audit log ingestion)
-Write-Host "  Granting Monitoring Metrics Publisher on DCR..." -ForegroundColor Cyan
-$existingMonitor = az role assignment list `
-    --assignee $FunctionAppPrincipalId `
-    --scope $DcrScope `
-    --role "Monitoring Metrics Publisher" `
-    --output json 2>$null | ConvertFrom-Json
-
-if ($existingMonitor -and $existingMonitor.Count -gt 0) {
-    Write-Host "    Already granted" -ForegroundColor Green
+if ($existing.Count -gt 0) {
+    Write-Host "  Permission already granted." -ForegroundColor Green
+    return
 }
-else {
-    for ($i = 1; $i -le $MaxRetries; $i++) {
-        try {
-            az role assignment create `
-                --assignee-object-id $FunctionAppPrincipalId `
-                --assignee-principal-type ServicePrincipal `
-                --role "Monitoring Metrics Publisher" `
-                --scope $DcrScope `
-                --output none 2>$null
-            Write-Host "    Granted" -ForegroundColor Green
-            break
+
+for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+    try {
+        az role assignment create `
+            --assignee-object-id $FunctionAppPrincipalId `
+            --assignee-principal-type ServicePrincipal `
+            --role $MonitoringMetricsPublisherRoleId `
+            --scope $DcrScope `
+            --output none `
+            --only-show-errors
+        Write-Host "  Permission granted." -ForegroundColor Green
+        return
+    }
+    catch {
+        if ($attempt -eq $MaxRetries) {
+            throw "Failed to grant DCR permission after $MaxRetries attempts: $($_.Exception.Message)"
         }
-        catch {
-            if ($i -eq $MaxRetries) {
-                throw "Failed to grant Monitoring Metrics Publisher after $MaxRetries attempts"
-            }
-            Write-Host "    Retry $i/$MaxRetries..." -ForegroundColor Yellow
-            Start-Sleep -Seconds $RetryDelaySeconds
-        }
+        Write-Host "  Waiting for managed-identity propagation ($attempt/$MaxRetries)..." -ForegroundColor Yellow
+        Start-Sleep -Seconds $RetryDelaySeconds
     }
 }
-
-Write-Host "Permissions granted successfully" -ForegroundColor Green
-exit 0

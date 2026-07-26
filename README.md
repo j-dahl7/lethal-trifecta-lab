@@ -1,211 +1,201 @@
 # Lethal Trifecta Gate for AI Agents
 
-> **Companion repo for the blog post: [Breaking and Defending the Lethal Trifecta](https://nineliveszerotrust.com/blog/lethal-trifecta/)**
+An isolated research lab that demonstrates a **Rule of Two** gate: an agent may
+accumulate at most two of the three conditions needed for data exfiltration.
+The call that would complete all three is blocked and is not persisted.
 
-A serverless gate that enforces the **Rule of Two** — blocking AI agent tool calls that would complete all 3 conditions required for data exfiltration. Implements the lethal trifecta defense pattern: any 2 of 3 conditions are allowed, but the 3rd (which would complete the trifecta) is blocked.
+This repository does **not** currently have a published companion article at
+`/blog/lethal-trifecta/`; that route does not exist, so this repo is intentionally
+not presented as a companion lab on the Nine Lives Zero Trust Labs page. Useful
+related material remains linked under [Related resources](#related-resources).
 
-## The Problem
+> **Validation boundary (July 25, 2026):** this revision was validated with
+> deterministic unit tests, Python compilation, PowerShell parsing, JSON parsing,
+> and a local Bicep build. It was not deployed to an Azure tenant during this
+> audit, so Azure role propagation, Function publication, Cosmos data-plane
+> access, DCR ingestion, and live cost behavior still require tenant validation.
 
-AI agents with tool access can be manipulated via prompt injection to exfiltrate sensitive data. The attack requires three conditions (the "Lethal Trifecta"):
+## Safety and cost
 
-| # | Condition | Example Tools |
-|---|-----------|---------------|
-| 1 | **Private Data** | `read_db`, `read_keyvault` |
-| 2 | **Untrusted Content** | `process_document`, `search_web` |
-| 3 | **Exfiltration Vector** | `send_http`, `send_email` |
+- The attack demo is local text-only simulation. It sends no data anywhere.
+- Seed records are obviously synthetic (`example.invalid`, invalid `000` SSNs).
+- Azure deployment creates billable Cosmos DB, Log Analytics, Functions, Storage,
+  Application Insights, Key Vault, and monitoring resources.
+- The gate is a teaching control, not a complete production agent-security system.
+- Preview owned cleanup immediately after deployment and remove the lab when done.
 
-Any single condition is harmless. Even two are safe. But when all three are satisfied in the same session, an agent can read private data, get poisoned by untrusted content, and send data to an attacker.
+## Threat model
 
-## The Solution
+| Condition | Example registered tools |
+|---|---|
+| Private data | `read_db`, `read_keyvault` |
+| Untrusted content | `process_document`, `process_user_message`, `search_web` |
+| Exfiltration vector | `send_http`, `send_email` |
 
-A centralized gate that evaluates every tool call:
+The authoritative policy operation is atomic. Concurrent calls cannot each read
+stale state and all become allowed: Cosmos updates use ETags and conditional
+replacement, while the explicitly test-only memory store uses a process lock.
 
-```
-Agent Tool Call → Trifecta Gate → ALLOW (200) or BLOCK (403)
-                       │
-                       ├── Session Tracker (per-session condition state)
-                       ├── Policy Engine (Rule of Two enforcement)
-                       └── Log Analytics (audit trail)
-```
+The gate fails closed:
 
-The gate tracks which trifecta conditions have been satisfied per session. It allows any combination of 2 conditions but blocks the 3rd call that would complete the trifecta.
-
----
+- gate, session, and registry routes require a generated Function host key;
+- unknown tools are blocked;
+- missing or unavailable Cosmos state returns a blocking `503`, never an empty
+  in-memory session;
+- required audit failure converts an otherwise allowed response to blocking
+  `503`;
+- request bodies, identifiers, session counts, histories, retries, and local
+  test-store cardinality are bounded.
 
 ## Prerequisites
 
-- Azure subscription with Owner access
-- Azure CLI configured (`az login`)
-- PowerShell 7+ (`pwsh`)
+- Azure CLI authenticated to the intended tenant and subscription
+- PowerShell 7+
+- Azure Functions Core Tools, recommended; the deployer has an authenticated zip
+  fallback when Core Tools is unavailable
+- Subscription-scope **Contributor** to create the owned resource group
+- **Role Based Access Control Administrator** (or narrowly equivalent delegated
+  role-assignment permission) for the lab's scoped role assignments
 
-No Entra ID setup, Graph API permissions, or directory roles required.
+Owner is not required. No Graph permissions or Entra directory role is required.
+The deployer receives Key Vault Secrets Officer on only the lab vault and Cosmos
+data contributor on only the synthetic `employees` container. The Function
+managed identity receives Cosmos data contributor on only `sessions` and
+Monitoring Metrics Publisher on only the lab DCR.
 
----
+## Local validation first
 
-## Quick Start
+```powershell
+python -m unittest discover -s tests -v
+python -m compileall -q function
 
-### 1. Clone the Repository
+Get-ChildItem scripts -Filter '*.ps1' | ForEach-Object {
+  $tokens = $null
+  $errors = $null
+  [System.Management.Automation.Language.Parser]::ParseFile(
+    $_.FullName, [ref]$tokens, [ref]$errors
+  ) | Out-Null
+  if ($errors.Count) { throw ($errors.Message -join '; ') }
+}
 
-```bash
-git clone https://github.com/j-dahl7/lethal-trifecta-lab.git
-cd lethal-trifecta-lab
+az bicep build --file bicep/main.bicep
 ```
 
-### 2. Run the Attack Demo (No Azure Required)
+CI repeats these checks on pushes and pull requests.
 
-See the unprotected attack path locally:
+## Run the harmless local attack simulation
 
 ```powershell
 ./scripts/Attack-Demo.ps1
 ```
 
-### 3. Deploy the Gate
+It prints the unprotected three-step sequence but performs no network, database,
+email, Key Vault, or file exfiltration operation.
+
+## Deploy
 
 ```powershell
-./scripts/Deploy-Lab.ps1
+./scripts/Deploy-Lab.ps1 -ProjectName 'trifecta-lab' -Location 'eastus'
 ```
 
-Or with custom settings:
+The orchestrator:
+
+1. deploys an ownership-tagged resource group and Bicep resources;
+2. creates the audit table and ownership-tagged DCR;
+3. grants only the required DCR-scoped ingestion role;
+4. configures managed-identity Cosmos access and required audit settings;
+5. publishes Function code and fails if both publication paths fail;
+6. idempotently seeds six synthetic records using an Entra data-plane token;
+7. obtains or generates a host key in memory and runs authenticated smoke tests.
+
+Any failed required step stops deployment and reports that Azure may contain a
+partial deployment. `-CleanupOnFailure` is an explicit destructive opt-in; it
+still runs the ownership checks in `Remove-Lab.ps1` before deletion.
+
+Use `-SkipFunctionDeploy`, `-SkipSeed`, or `-SkipTest` only deliberately. Skipped
+steps are reported and are never described as completed.
+
+## Use the authenticated API
+
+Health is the sole anonymous route. Retrieve a host key without printing it:
 
 ```powershell
-./scripts/Deploy-Lab.ps1 -ProjectName "my-trifecta" -Location "westus2"
+$functionKeyText = az functionapp keys list `
+  --name '<function-app-name>' `
+  --resource-group 'trifecta-lab-rg' `
+  --query 'functionKeys.default' `
+  --output tsv
+$functionKey = ConvertTo-SecureString $functionKeyText -AsPlainText -Force
+Remove-Variable functionKeyText
 ```
 
-The script will:
-1. Deploy Azure resources via Bicep (Resource Group, Cosmos DB, Key Vault, Function App, Log Analytics, DCE)
-2. Create the `TrifectaAudit_CL` custom table and Data Collection Rule
-3. Grant Monitoring Metrics Publisher to the Function App managed identity
-4. Configure Function App settings (DCR, Cosmos DB)
-5. Deploy Function code
-6. Seed Cosmos DB with fake employee records
-7. Run smoke tests
-
-### 4. Run the Defense Demo
+Run the live defense demo:
 
 ```powershell
-./scripts/Defense-Demo.ps1 -FunctionAppUrl "https://trifecta-lab-gate-XXXXXX.azurewebsites.net"
+./scripts/Defense-Demo.ps1 `
+  -FunctionAppUrl 'https://<function-app-name>.azurewebsites.net' `
+  -FunctionKey $functionKey
 ```
 
----
+Or call the gate directly with the key header:
 
-## API Endpoints
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/evaluate` | POST | Core gate — evaluates tool call, returns ALLOW (200) or BLOCK (403) |
-| `/api/session/{id}` | GET | Returns session state (active conditions, count, missing) |
-| `/api/tools` | GET | Returns full tool registry |
-| `/api/health` | GET | Health check |
-
-### Evaluate a Tool Call
-
-```bash
-curl -X POST "$GATE_URL/api/evaluate" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "session_id": "session-123",
-    "tool_name": "read_db"
-  }'
-```
-
-Response (ALLOW):
-```json
-{
-  "decision": "ALLOW",
-  "tool_name": "read_db",
-  "condition": "private_data",
-  "reason": "Tool 'read_db' allowed. Condition 'private_data' recorded.",
-  "session_id": "session-123",
-  "conditions_before": [],
-  "conditions_after": ["private_data"]
+```powershell
+$keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($functionKey)
+try {
+  $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
+  $headers = @{ 'x-functions-key' = $plainKey }
+  Invoke-RestMethod `
+    -Uri 'https://<function-app-name>.azurewebsites.net/api/evaluate' `
+    -Method Post `
+    -Headers $headers `
+    -ContentType 'application/json' `
+    -Body '{"session_id":"session-123","tool_name":"read_db"}'
+}
+finally {
+  [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPointer)
+  $headers['x-functions-key'] = $null
+  Remove-Variable plainKey, headers -ErrorAction SilentlyContinue
 }
 ```
 
-Response (BLOCK - 403):
-```json
-{
-  "decision": "BLOCK",
-  "tool_name": "send_http",
-  "condition": "exfiltration_vector",
-  "reason": "Tool 'send_http' would satisfy condition 'exfiltration_vector', completing all 3 trifecta conditions. Blocked by Rule of Two.",
-  "session_id": "session-123",
-  "conditions_before": ["private_data", "untrusted_content"],
-  "conditions_after": ["private_data", "untrusted_content"]
-}
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /api/health` | Anonymous | Non-secret readiness only |
+| `POST /api/evaluate` | Function key | Atomic Rule-of-Two decision |
+| `GET /api/session/{id}` | Function key | Existing bounded session state |
+| `GET /api/tools` | Function key | Validated tool registry |
+
+Unknown sessions return `404`. Invalid or oversized input returns `400`/`413`.
+Session/store limits return `429`/`503` with `decision: BLOCK` where applicable.
+
+## Architecture and ownership
+
+```text
+authenticated caller
+        |
+        v
+Azure Function gate ---- required decision audit ----> DCR / Log Analytics
+        |
+        +---- managed identity, container-scoped ----> Cosmos sessions
 ```
 
----
+Every top-level Azure resource receives these non-overridable tags:
 
-## Tool Registry
+- `nlzt-owner=lethal-trifecta-lab`
+- `project=<ProjectName>`
+- `environment=lab`
+- `purpose=lethal-trifecta-demo`
 
-7 tools mapped to 3 trifecta conditions:
+Cosmos local/key authentication and Storage shared-key authentication are
+disabled. The Function host and deployment container both use its system-assigned
+identity. The fixed demo secret from the old revision was removed; Bicep generates
+a secure synthetic value on deployment.
+The in-memory session store requires both `SESSION_STORE=memory` and
+`ALLOW_IN_MEMORY_SESSION_STORE=true` and exists solely for isolated local tests.
 
-| Tool | Condition | Category |
-|------|-----------|----------|
-| `read_db` | private_data | Data Access |
-| `read_keyvault` | private_data | Data Access |
-| `process_document` | untrusted_content | Content Processing |
-| `process_user_message` | untrusted_content | Content Processing |
-| `search_web` | untrusted_content | Content Processing |
-| `send_http` | exfiltration_vector | External Communication |
-| `send_email` | exfiltration_vector | External Communication |
+## Audit verification
 
----
-
-## Architecture
-
-**Components:**
-
-- **Trifecta Gate** — Azure Function App with 4 HTTP endpoints
-- **Session Tracker** — Cosmos DB-backed per-session state (persists across instances)
-- **Policy Engine** — Evaluates Rule of Two, returns ALLOW/BLOCK
-- **Log Analytics** — Custom `TrifectaAudit_CL` table for audit trail
-- **Cosmos DB** — Serverless, stores fake employee records for demo
-- **Key Vault** — Contains demo secret (represents private data)
-
----
-
-## File Structure
-
-```
-lethal-trifecta-lab/
-├── README.md
-├── LICENSE
-├── .gitignore
-├── bicep/
-│   ├── main.bicep               # Subscription-scoped orchestrator
-│   ├── main.bicepparam
-│   └── modules/
-│       ├── monitoring.bicep     # Log Analytics + DCE
-│       ├── core.bicep           # Cosmos DB (serverless) + Key Vault
-│       └── function.bicep       # Function App (Flex Consumption, Python 3.11)
-├── scripts/
-│   ├── Deploy-Lab.ps1           # 7-step orchestrator
-│   ├── Deploy-Azure.ps1         # az deployment sub create
-│   ├── Grant-Permissions.ps1    # Monitoring Metrics Publisher on DCR
-│   ├── Configure-Function.ps1   # Set app settings (DCR, Cosmos)
-│   ├── Seed-Data.ps1            # Insert fake employee records
-│   ├── Attack-Demo.ps1          # Local simulation — no gate
-│   ├── Defense-Demo.ps1         # Live demo — gate blocks 3rd call
-│   └── Test-Lab.ps1             # Smoke tests
-└── function/
-    ├── function_app.py          # HTTP triggers: /evaluate, /session, /tools, /health
-    ├── tool_registry.py         # Load tools.json, get_tool_conditions()
-    ├── session_tracker.py       # Per-session state, would_complete_trifecta()
-    ├── policy_engine.py         # evaluate() → GateResult (ALLOW/BLOCK)
-    ├── audit.py                 # Log to TrifectaAudit_CL via DCR
-    ├── tools.json               # 7 tools mapped to conditions
-    ├── requirements.txt
-    └── host.json
-```
-
----
-
-## Verification
-
-### KQL Queries
-
-After running the Defense Demo, verify the audit trail:
+After an authenticated defense demo, query:
 
 ```kql
 TrifectaAudit_CL
@@ -214,41 +204,69 @@ TrifectaAudit_CL
 | order by TimeGenerated asc
 ```
 
-Expected output: 3 rows (ALLOW, ALLOW, BLOCK).
-
-### Smoke Tests
-
-```powershell
-./scripts/Test-Lab.ps1 -FunctionAppUrl "https://trifecta-lab-gate-XXXXXX.azurewebsites.net"
-```
-
-Tests: health endpoint, tools list (7 tools), single allow, trifecta block, session state.
-
----
-
-## Limitations
-
-- **AuthLevel.ANONYMOUS** — No authentication on endpoints (lab simplicity). Production should use Function keys or Entra ID auth.
-- **Session TTL** — Sessions expire after 24 hours in Cosmos DB. Production implementations may need configurable TTL or explicit session cleanup.
-
----
+Expect two `ALLOW` rows and one `BLOCK` row. Ingestion can be delayed. An HTTP
+decision is not proof that the row is already queryable.
 
 ## Cleanup
 
-```bash
-az group delete --name trifecta-lab-rg --yes
+Preview first:
+
+```powershell
+./scripts/Remove-Lab.ps1 -ProjectName 'trifecta-lab' -WhatIf
 ```
 
----
+Then remove the exact owned deployment:
 
-## Resources
+```powershell
+./scripts/Remove-Lab.ps1 -ProjectName 'trifecta-lab'
+```
 
-- [Blog: Breaking and Defending the Lethal Trifecta](https://nineliveszerotrust.com/blog/lethal-trifecta/)
-- [ZSP Azure Lab (companion)](https://github.com/j-dahl7/zsp-azure-lab)
+Cleanup verifies the active subscription, exact resource-group name, complete
+resource-group ownership identity, and ownership tags on every top-level resource
+before issuing the resource-group delete. It refuses legacy, untagged, or foreign
+resources. Do not replace it with an unverified `az group delete` command.
+
+Older deployments made before ownership tags were introduced require manual
+inventory and immutable-ID verification; the cleanup script intentionally refuses
+to infer ownership from a name alone.
+
+## Repository layout
+
+```text
+bicep/                 Azure resources and container-scoped data roles
+function/              Authenticated Function gate and atomic session policy
+scripts/Deploy-Lab.ps1 Fail-fast deployment orchestrator
+scripts/Remove-Lab.ps1 Ownership-validated cleanup
+scripts/Test-Lab.ps1   Authenticated live smoke tests
+scripts/Attack-Demo.ps1 Harmless local simulation
+scripts/Defense-Demo.ps1 Authenticated live defense demonstration
+tests/                 Deterministic policy, race, bounds, and safety contracts
+.github/workflows/     CI safety validation
+```
+
+## Remaining limitations
+
+- A shared Function key authenticates the lab client but does not provide
+  per-user identity, authorization, revocation policy, or network isolation.
+- The Rule of Two depends on complete, correct tool registration and on every
+  real tool execution being mediated by the gate.
+- The three-condition model does not inspect payload sensitivity, destination
+  trust, model output, indirect channels, or actions outside this registry.
+- Cosmos and DCR are public endpoints protected by Entra/RBAC; private endpoints
+  and VNet integration are outside this cost-conscious lab.
+- Session TTL is 24 hours and no application route resets a session.
+- Cleanup validates ARM-tracked top-level resources. It cannot prove that nobody
+  added data-plane items inside an otherwise owned Cosmos account or Key Vault;
+  keep unrelated data out of the dedicated lab resource group.
+
+## Related resources
+
+- [Nine Lives Zero Trust](https://nineliveszerotrust.com/)
+- [ZSP Azure Lab](https://github.com/j-dahl7/zsp-azure-lab)
 - [OWASP Top 10 for LLM Applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/)
-
----
+- [Azure Cosmos DB Python quickstart](https://learn.microsoft.com/azure/cosmos-db/quickstart-python)
+- [Azure Functions security concepts](https://learn.microsoft.com/azure/azure-functions/security-concepts)
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE).

@@ -12,6 +12,9 @@ param location string
 @description('Log Analytics Workspace ID for App Insights')
 param logAnalyticsWorkspaceId string
 
+@description('Cosmos DB endpoint used with the Function App managed identity')
+param cosmosEndpoint string
+
 @description('Tags for all resources')
 param tags object = {}
 
@@ -19,11 +22,12 @@ param tags object = {}
 var suffix = substring(uniqueString(resourceGroup().id), 0, 6)
 
 // Merge default tags
-var resourceTags = union({
+var resourceTags = union(tags, {
   project: projectName
   environment: 'lab'
   purpose: 'lethal-trifecta-demo'
-}, tags)
+  'nlzt-owner': 'lethal-trifecta-lab'
+})
 
 // Storage account for Function App (Flex Consumption requires blob containers)
 resource functionStorage 'Microsoft.Storage/storageAccounts@2023-01-01' = {
@@ -37,6 +41,8 @@ resource functionStorage 'Microsoft.Storage/storageAccounts@2023-01-01' = {
   properties: {
     minimumTlsVersion: 'TLS1_2'
     allowBlobPublicAccess: false
+    allowSharedKeyAccess: false
+    defaultToOAuthAuthentication: true
     supportsHttpsTrafficOnly: true
   }
 }
@@ -101,13 +107,12 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           type: 'blobContainer'
           value: '${functionStorage.properties.primaryEndpoints.blob}deployments'
           authentication: {
-            type: 'StorageAccountConnectionString'
-            storageAccountConnectionStringName: 'DEPLOYMENT_STORAGE_CONNECTION_STRING'
+            type: 'SystemAssignedIdentity'
           }
         }
       }
       scaleAndConcurrency: {
-        maximumInstanceCount: 40
+        maximumInstanceCount: 5
         instanceMemoryMB: 2048
       }
       runtime: {
@@ -116,18 +121,37 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
       }
     }
     siteConfig: {
+      ftpsState: 'Disabled'
+      minTlsVersion: '1.2'
+      http20Enabled: true
       appSettings: [
         {
-          name: 'AzureWebJobsStorage'
-          value: 'DefaultEndpointsProtocol=https;AccountName=${functionStorage.name};EndpointSuffix=${environment().suffixes.storage};AccountKey=${functionStorage.listKeys().keys[0].value}'
-        }
-        {
-          name: 'DEPLOYMENT_STORAGE_CONNECTION_STRING'
-          value: 'DefaultEndpointsProtocol=https;AccountName=${functionStorage.name};EndpointSuffix=${environment().suffixes.storage};AccountKey=${functionStorage.listKeys().keys[0].value}'
+          name: 'AzureWebJobsStorage__accountName'
+          value: functionStorage.name
         }
         {
           name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
           value: appInsights.properties.ConnectionString
+        }
+        {
+          name: 'SESSION_STORE'
+          value: 'cosmos'
+        }
+        {
+          name: 'COSMOS_ENDPOINT'
+          value: cosmosEndpoint
+        }
+        {
+          name: 'COSMOS_DATABASE_NAME'
+          value: 'trifecta-db'
+        }
+        {
+          name: 'COSMOS_CONTAINER_NAME'
+          value: 'sessions'
+        }
+        {
+          name: 'AUDIT_REQUIRED'
+          value: 'true'
         }
       ]
     }
@@ -135,6 +159,33 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
   dependsOn: [
     deploymentContainer
   ]
+}
+
+// Host coordination and deployment package access, scoped to this storage account.
+resource functionStorageBlobDataOwner 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(functionStorage.id, functionApp.name, 'Storage Blob Data Owner')
+  scope: functionStorage
+  properties: {
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
+    principalId: functionApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+resource scmBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2022-03-01' = {
+  parent: functionApp
+  name: 'scm'
+  properties: {
+    allow: false
+  }
+}
+
+resource ftpBasicAuth 'Microsoft.Web/sites/basicPublishingCredentialsPolicies@2022-03-01' = {
+  parent: functionApp
+  name: 'ftp'
+  properties: {
+    allow: false
+  }
 }
 
 // Outputs

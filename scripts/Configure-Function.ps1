@@ -1,111 +1,59 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Configures the Function App with DCR and Cosmos DB settings.
+    Configures fail-closed Function App settings without account keys.
 
 .DESCRIPTION
-    Updates Function App settings with:
-    - Data Collection Rule endpoint and ID (for audit logging)
-    - Cosmos DB endpoint, key, and database name (for session state and demo data)
-
-.PARAMETER FunctionAppName
-    Name of the Function App.
-
-.PARAMETER ResourceGroupName
-    Name of the resource group containing the Function App.
-
-.PARAMETER DcrEndpoint
-    Data Collection Endpoint URL.
-
-.PARAMETER DcrRuleId
-    Data Collection Rule immutable ID (dcr-...).
-
-.PARAMETER CosmosEndpoint
-    Cosmos DB account endpoint URL.
-
-.PARAMETER CosmosAccountName
-    Cosmos DB account name (used to retrieve key).
-
-.PARAMETER CosmosKey
-    Cosmos DB account key. If not provided, retrieved from CosmosAccountName.
-
-.PARAMETER CosmosDatabaseName
-    Cosmos DB database name. Default: trifecta-db
+    Sets DCR ingestion and Cosmos endpoint metadata. Cosmos authentication uses
+    the Function App managed identity and a container-scoped data-plane role.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
     [string]$FunctionAppName,
 
     [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
     [string]$ResourceGroupName,
 
     [Parameter(Mandatory)]
+    [ValidatePattern('^https://[^/]+\.ingest\.monitor\.azure\.com/?$')]
     [string]$DcrEndpoint,
 
     [Parameter(Mandatory)]
+    [ValidatePattern('^dcr-[A-Za-z0-9-]{8,128}$')]
     [string]$DcrRuleId,
 
     [Parameter(Mandatory)]
+    [ValidatePattern('^https://[^/]+\.documents\.azure\.com(?::\d+)?/?$')]
     [string]$CosmosEndpoint,
 
     [Parameter()]
-    [string]$CosmosAccountName,
-
-    [Parameter()]
-    [string]$CosmosKey,
-
-    [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$CosmosDatabaseName = 'trifecta-db'
 )
 
 $ErrorActionPreference = 'Stop'
+$PSNativeCommandUseErrorActionPreference = $true
 
-Write-Host "Configuring Function App settings..." -ForegroundColor Yellow
-
-# Retrieve Cosmos DB key if not provided
-if (-not $CosmosKey -and $CosmosAccountName) {
-    Write-Host "  Retrieving Cosmos DB key..." -ForegroundColor Cyan
-    $CosmosKey = az cosmosdb keys list `
-        --name $CosmosAccountName `
-        --resource-group $ResourceGroupName `
-        --query primaryMasterKey -o tsv 2>$null
-
-    if (-not $CosmosKey) {
-        Write-Host "  WARNING: Could not retrieve Cosmos DB key. Session persistence may not work." -ForegroundColor Yellow
-    }
-}
-
-# Build settings array
 $settings = @(
-    "DCR_ENDPOINT=$DcrEndpoint"
+    "DCR_ENDPOINT=$($DcrEndpoint.TrimEnd('/'))"
     "DCR_RULE_ID=$DcrRuleId"
-    "COSMOS_ENDPOINT=$CosmosEndpoint"
+    "SESSION_STORE=cosmos"
+    "COSMOS_ENDPOINT=$($CosmosEndpoint.TrimEnd('/'))"
     "COSMOS_DATABASE_NAME=$CosmosDatabaseName"
+    "COSMOS_CONTAINER_NAME=sessions"
+    "AUDIT_REQUIRED=true"
 )
 
-if ($CosmosKey) {
-    $settings += "COSMOS_KEY=$CosmosKey"
-}
-
-# Update Function App settings
-Write-Host "  Updating app settings..." -ForegroundColor Cyan
+Write-Host "Configuring managed-identity Function App settings..." -ForegroundColor Yellow
 az functionapp config appsettings set `
     --name $FunctionAppName `
     --resource-group $ResourceGroupName `
     --settings $settings `
-    --output none 2>$null
+    --output none `
+    --only-show-errors
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to update Function App settings"
-}
-
-Write-Host "  Settings configured:" -ForegroundColor Green
-foreach ($setting in $settings) {
-    $key = ($setting -split '=')[0]
-    Write-Host "    - $key" -ForegroundColor Gray
-}
-
-Write-Host "Function App configured successfully" -ForegroundColor Green
-exit 0
+Write-Host "Function App configured without Cosmos account keys." -ForegroundColor Green

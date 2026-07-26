@@ -9,8 +9,12 @@ param projectName string
 @description('Azure region')
 param location string
 
-@description('Deployer principal ID for Key Vault admin access')
+@description('Deployer principal ID for scoped Key Vault secret access')
 param deployerPrincipalId string
+
+@secure()
+@description('Synthetic generated value for the lab-only Key Vault secret')
+param demoSecretValue string
 
 @description('Tags for all resources')
 param tags object = {}
@@ -19,11 +23,12 @@ param tags object = {}
 var suffix = substring(uniqueString(resourceGroup().id), 0, 6)
 
 // Merge default tags with provided tags
-var resourceTags = union({
+var resourceTags = union(tags, {
   project: projectName
   environment: 'lab'
   purpose: 'lethal-trifecta-demo'
-}, tags)
+  'nlzt-owner': 'lethal-trifecta-lab'
+})
 
 // Cosmos DB Account (serverless)
 resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2023-11-15' = {
@@ -47,6 +52,7 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2023-11-15' = {
     consistencyPolicy: {
       defaultConsistencyLevel: 'Session'
     }
+    disableLocalAuth: true
   }
 }
 
@@ -113,12 +119,12 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-// Grant deployer Key Vault Administrator role
-resource deployerKvAdmin 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, deployerPrincipalId, 'Key Vault Administrator')
+// Grant only secret-management access; the deployer does not need vault administration.
+resource deployerKvSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(keyVault.id, deployerPrincipalId, 'Key Vault Secrets Officer')
   scope: keyVault
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '00482a5a-887f-4fb3-b363-3b7fe8e74483') // Key Vault Administrator
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7') // Key Vault Secrets Officer
     principalId: deployerPrincipalId
     principalType: 'User'
   }
@@ -129,10 +135,10 @@ resource demoSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
   parent: keyVault
   name: 'employee-api-key'
   properties: {
-    value: 'sk-demo-trifecta-lab-do-not-use-in-production'
+    value: demoSecretValue
   }
   dependsOn: [
-    deployerKvAdmin
+    deployerKvSecretsOfficer
   ]
 }
 
