@@ -1,142 +1,75 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Demonstrates the Trifecta Gate blocking the 3rd condition.
-
-.DESCRIPTION
-    Calls the deployed Trifecta Gate with 3 sequential tool evaluations.
-    Steps 1-2 return 200 ALLOW. Step 3 returns 403 BLOCK.
-
-    Then queries the session endpoint to confirm 2/3 conditions are active.
-
-.PARAMETER FunctionAppUrl
-    Base URL of the deployed Function App.
-
-.PARAMETER SessionId
-    Session ID for the demo. Default: demo-session-<timestamp>
-
-.EXAMPLE
-    ./Defense-Demo.ps1 -FunctionAppUrl "https://trifecta-lab-gate-abc123.azurewebsites.net"
+    Demonstrates authenticated Rule-of-Two enforcement.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
+    [ValidatePattern('^https://[^/]+$')]
     [string]$FunctionAppUrl,
 
+    [Parameter(Mandatory)]
+    [SecureString]$FunctionKey,
+
     [Parameter()]
-    [string]$SessionId = "demo-session-$(Get-Date -Format 'yyyyMMddHHmmss')"
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')]
+    [string]$SessionId = "demo-$([guid]::NewGuid())"
 )
 
 $ErrorActionPreference = 'Stop'
-
-# Trim trailing slash
 $FunctionAppUrl = $FunctionAppUrl.TrimEnd('/')
-
-Write-Host ""
-Write-Host "========================================================" -ForegroundColor Green
-Write-Host "  TRIFECTA GATE DEFENSE DEMO" -ForegroundColor Green
-Write-Host "========================================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "Gate URL:   $FunctionAppUrl" -ForegroundColor Cyan
-Write-Host "Session ID: $SessionId" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "Sending 3 tool calls to the Trifecta Gate." -ForegroundColor Yellow
-Write-Host "The first 2 will be ALLOWED. The 3rd will be BLOCKED." -ForegroundColor Yellow
-Write-Host ""
-
-$evaluateUrl = "$FunctionAppUrl/api/evaluate"
+$keyPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($FunctionKey)
+try {
+    $plainKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPointer)
+    $authHeaders = @{ 'x-functions-key' = $plainKey }
+}
+finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($keyPointer)
+    Remove-Variable plainKey -ErrorAction SilentlyContinue
+}
 
 function Invoke-GateEvaluation {
     param(
-        [int]$Step,
-        [string]$ToolName,
-        [string]$ExpectedDecision
+        [Parameter(Mandatory)][string]$ToolName,
+        [Parameter(Mandatory)][ValidateSet('ALLOW','BLOCK')][string]$ExpectedDecision
     )
-
-    Write-Host "--- Step $Step ---" -ForegroundColor White
-    Write-Host "Tool: $ToolName" -ForegroundColor Cyan
-
-    $body = @{
-        session_id = $SessionId
-        tool_name = $ToolName
-    } | ConvertTo-Json
-
-    try {
-        $response = Invoke-WebRequest -Uri $evaluateUrl -Method POST `
-            -Body $body -ContentType "application/json" `
-            -TimeoutSec 30 -ErrorAction Stop
-
-        $result = $response.Content | ConvertFrom-Json
-        $statusCode = $response.StatusCode
-
-        if ($result.decision -eq "ALLOW") {
-            Write-Host "  Status:    $statusCode" -ForegroundColor Green
-            Write-Host "  Decision:  $($result.decision)" -ForegroundColor Green
-            Write-Host "  Condition: $($result.condition)" -ForegroundColor Gray
-            Write-Host "  Active:    [$($result.conditions_after -join ', ')]" -ForegroundColor Gray
-        }
-        else {
-            Write-Host "  Status:    $statusCode" -ForegroundColor Red
-            Write-Host "  Decision:  $($result.decision)" -ForegroundColor Red
-            Write-Host "  Reason:    $($result.reason)" -ForegroundColor Yellow
-        }
+    $body = @{ session_id=$SessionId; tool_name=$ToolName } | ConvertTo-Json -Compress
+    $response = Invoke-WebRequest `
+        -Uri "$FunctionAppUrl/api/evaluate" `
+        -Method Post `
+        -Headers $authHeaders `
+        -Body $body `
+        -ContentType 'application/json' `
+        -TimeoutSec 30 `
+        -SkipHttpErrorCheck
+    $result = $response.Content | ConvertFrom-Json
+    $expectedStatus = if ($ExpectedDecision -eq 'ALLOW') { 200 } else { 403 }
+    if ($response.StatusCode -ne $expectedStatus -or $result.decision -ne $ExpectedDecision) {
+        throw "Expected $ExpectedDecision/$expectedStatus for '$ToolName', got $($result.decision)/$($response.StatusCode)."
     }
-    catch {
-        $statusCode = $_.Exception.Response.StatusCode.value__
-        if ($statusCode -eq 403) {
-            $errorBody = $_.ErrorDetails.Message | ConvertFrom-Json
-
-            Write-Host "  Status:    403" -ForegroundColor Red
-            Write-Host "  Decision:  $($errorBody.decision)" -ForegroundColor Red
-            Write-Host "  Reason:    $($errorBody.reason)" -ForegroundColor Yellow
-        }
-        else {
-            Write-Host "  ERROR: $($_.Exception.Message)" -ForegroundColor Red
-        }
-    }
-
-    Write-Host ""
-    Start-Sleep -Milliseconds 500
+    Write-Host "$ToolName -> $($result.decision) ($($result.conditions_after -join ', '))" `
+        -ForegroundColor $(if ($ExpectedDecision -eq 'ALLOW') { 'Green' } else { 'Yellow' })
 }
-
-# Step 1: Allow - private_data
-Invoke-GateEvaluation -Step 1 -ToolName "read_db" -ExpectedDecision "ALLOW"
-
-# Step 2: Allow - untrusted_content
-Invoke-GateEvaluation -Step 2 -ToolName "process_document" -ExpectedDecision "ALLOW"
-
-# Step 3: Block - exfiltration_vector (would complete trifecta)
-Invoke-GateEvaluation -Step 3 -ToolName "send_http" -ExpectedDecision "BLOCK"
-
-# Query session state
-Write-Host "--- Session State ---" -ForegroundColor White
-Write-Host "Querying session endpoint..." -ForegroundColor Cyan
 
 try {
-    $sessionUrl = "$FunctionAppUrl/api/session/$SessionId"
-    $sessionResponse = Invoke-RestMethod -Uri $sessionUrl -Method GET -TimeoutSec 30
-    Write-Host "  Conditions met:     $($sessionResponse.conditions_met)/$($sessionResponse.conditions_total)" -ForegroundColor Cyan
-    Write-Host "  Active conditions:  [$($sessionResponse.active_conditions -join ', ')]" -ForegroundColor Green
-    Write-Host "  Missing conditions: [$($sessionResponse.missing_conditions -join ', ')]" -ForegroundColor Yellow
-    Write-Host "  Trifecta complete:  $($sessionResponse.trifecta_complete)" -ForegroundColor $(if ($sessionResponse.trifecta_complete) { 'Red' } else { 'Green' })
-    Write-Host "  Total calls:        $($sessionResponse.call_count)" -ForegroundColor Gray
-}
-catch {
-    Write-Host "  Warning: Could not query session state: $($_.Exception.Message)" -ForegroundColor Yellow
-}
+    Write-Host "`n=== Authenticated Trifecta Gate Defense Demo ===" -ForegroundColor Cyan
+    Invoke-GateEvaluation -ToolName 'read_db' -ExpectedDecision 'ALLOW'
+    Invoke-GateEvaluation -ToolName 'process_document' -ExpectedDecision 'ALLOW'
+    Invoke-GateEvaluation -ToolName 'send_http' -ExpectedDecision 'BLOCK'
 
-Write-Host ""
-Write-Host "========================================================" -ForegroundColor Green
-Write-Host "  DEFENSE SUCCESSFUL - TRIFECTA BLOCKED" -ForegroundColor Green
-Write-Host "========================================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "The Rule of Two enforced:" -ForegroundColor Yellow
-Write-Host "  [x] private_data        - ALLOWED (1/3 conditions)" -ForegroundColor Green
-Write-Host "  [x] untrusted_content   - ALLOWED (2/3 conditions)" -ForegroundColor Green
-Write-Host "  [ ] exfiltration_vector  - BLOCKED (would complete 3/3)" -ForegroundColor Red
-Write-Host ""
-Write-Host "The agent has access to sensitive data AND processed untrusted" -ForegroundColor Gray
-Write-Host "content, but cannot exfiltrate because the gate blocks the 3rd" -ForegroundColor Gray
-Write-Host "condition that would complete the lethal trifecta." -ForegroundColor Gray
-Write-Host ""
+    $session = Invoke-RestMethod `
+        -Uri "$FunctionAppUrl/api/session/$SessionId" `
+        -Method Get `
+        -Headers $authHeaders `
+        -TimeoutSec 30
+    if ($session.conditions_met -ne 2 -or $session.trifecta_complete) {
+        throw 'Defense demo ended outside the safe 2/3 state.'
+    }
+    Write-Host 'Defense succeeded: the third condition was blocked and not persisted.' -ForegroundColor Green
+}
+finally {
+    $authHeaders['x-functions-key'] = $null
+    Remove-Variable authHeaders -ErrorAction SilentlyContinue
+}

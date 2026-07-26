@@ -1,0 +1,14 @@
+# Azure Functions
+azure-functions==1.24.0
+
+# Shared Azure SDK primitives used for Cosmos optimistic concurrency
+azure-core==1.41.0
+
+# Azure Identity (for managed identity)
+azure-identity==1.25.3
+
+# Azure Monitor (for Log Analytics ingestion)
+azure-monitor-ingestion==1.1.0
+
+# Azure Cosmos DB
+azure-cosmos==4.16.1

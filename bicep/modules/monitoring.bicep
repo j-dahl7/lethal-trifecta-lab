@@ -13,11 +13,12 @@ param location string
 param tags object = {}
 
 // Merge default tags
-var resourceTags = union({
+var resourceTags = union(tags, {
   project: projectName
   environment: 'lab'
   purpose: 'lethal-trifecta-demo'
-}, tags)
+  'nlzt-owner': 'lethal-trifecta-lab'
+})
 
 // Log Analytics Workspace
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {

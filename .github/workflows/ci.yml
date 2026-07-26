@@ -1,0 +1,56 @@
+name: Safety validation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: function/requirements.lock
+
+      - name: Install hash-locked runtime dependencies
+        run: python -m pip install --require-hashes --requirement function/requirements.lock
+
+      - name: Run deterministic unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Python and validate JSON
+        shell: pwsh
+        run: |
+          python -m compileall -q function
+          Get-ChildItem function -Filter '*.json' | ForEach-Object {
+            Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json | Out-Null
+          }
+
+      - name: Parse every PowerShell script
+        shell: pwsh
+        run: |
+          $failed = $false
+          Get-ChildItem scripts -Filter '*.ps1' | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count) {
+              $failed = $true
+              $errors | ForEach-Object { Write-Error $_.Message }
+            }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Build Bicep
+        run: az bicep build --file bicep/main.bicep --stdout > /dev/null

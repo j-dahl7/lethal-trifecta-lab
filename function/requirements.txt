@@ -1,11 +1,5 @@
-# Azure Functions
-azure-functions>=1.17.0
-
-# Azure Identity (for managed identity)
-azure-identity>=1.15.0
-
-# Azure Monitor (for Log Analytics ingestion)
-azure-monitor-ingestion>=1.0.3
-
-# Azure Cosmos DB
-azure-cosmos>=4.5.0
+# Azure Functions remote builds consume this file. Keep the runtime dependency
+# graph in the generated lock and require every downloaded artifact to match a
+# reviewed SHA-256 hash.
+--require-hashes
+-r requirements.lock
